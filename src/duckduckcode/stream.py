@@ -13,8 +13,6 @@ class OpenAIStreamEventParser:
         event_type = getattr(event, "type", "")
         if event_type == "response.output_text.delta":
             return ConversationEvent(getattr(event, "delta", ""))
-        if event_type == "response.function_call_arguments.done":
-            return ToolCallEvent(_tool_call_from_event(event))
         if event_type == "response.output_item.done":
             item = getattr(event, "item", None)
             if getattr(item, "type", "") == "function_call":

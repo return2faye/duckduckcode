@@ -10,6 +10,8 @@ from .config import Config
 from .context import ContextManager
 from .event import ConversationEvent, ErrorEvent
 from .openai_client import OpenAIClient
+from .tool import ToolManager
+from .tools import create_read_file_tool
 from .tui import run_tui
 
 
@@ -82,9 +84,12 @@ def main() -> None:
 
 
 def build_agent(config: Config) -> Agent:
+    tools = ToolManager()
+    tools.register(create_read_file_tool())
     return Agent(
         OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
         ContextManager(reasoning=config.reasoning),
+        tools,
     )
 
 

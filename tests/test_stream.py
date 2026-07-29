@@ -28,10 +28,17 @@ class OpenAIStreamTest(unittest.TestCase):
                     "Event",
                     (),
                     {
-                        "type": "response.function_call_arguments.done",
-                        "item_id": "call_1",
-                        "name": "read_file",
-                        "arguments": '{"path": "README.md"}',
+                        "type": "response.output_item.done",
+                        "item": type(
+                            "Item",
+                            (),
+                            {
+                                "type": "function_call",
+                                "call_id": "call_1",
+                                "name": "read_file",
+                                "arguments": '{"path": "README.md"}',
+                            },
+                        )(),
                     },
                 )()
             ),
@@ -63,6 +70,42 @@ class OpenAIStreamTest(unittest.TestCase):
                 )()
             ),
             DoneEvent(token_usage=12),
+        )
+
+    def test_handler_ignores_incomplete_function_arguments_event(self) -> None:
+        events = [
+            type(
+                "Event",
+                (),
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": "item_1",
+                    "name": None,
+                    "arguments": '{"path": "README.md"}',
+                },
+            )(),
+            type(
+                "Event",
+                (),
+                {
+                    "type": "response.output_item.done",
+                    "item": type(
+                        "Item",
+                        (),
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "ReadFile",
+                            "arguments": '{"path": "README.md"}',
+                        },
+                    )(),
+                },
+            )(),
+        ]
+
+        self.assertEqual(
+            list(OpenAIStreamEventHandler().handle(events)),
+            [ToolCallEvent(ToolCall("call_1", "ReadFile", {"path": "README.md"}))],
         )
 
     def test_handler_filters_unknown_events(self) -> None:

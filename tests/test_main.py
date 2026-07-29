@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import io
 import unittest
+from unittest.mock import patch
 
+from duckduckcode.config import Config
 from duckduckcode.event import ConversationEvent, DoneEvent
-from duckduckcode.main import run_repl
+from duckduckcode.main import build_agent, run_repl
 
 
 class MainTest(unittest.TestCase):
+    def test_build_agent_registers_read_file(self) -> None:
+        with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+            agent = build_agent(Config("test-key"))
+
+        self.assertEqual(
+            [schema["name"] for schema in agent.tools.schemas()],
+            ["ReadFile"],
+        )
+
     def test_repl_streams_agent_responses_for_multiple_turns(self) -> None:
         calls = []
 

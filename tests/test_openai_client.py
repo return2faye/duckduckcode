@@ -103,10 +103,17 @@ class OpenAIClientTest(unittest.TestCase):
                 "Event",
                 (),
                 {
-                    "type": "response.function_call_arguments.done",
-                    "item_id": "call_1",
-                    "name": "read_file",
-                    "arguments": '{"path": "README.md"}',
+                    "type": "response.output_item.done",
+                    "item": type(
+                        "Item",
+                        (),
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "read_file",
+                            "arguments": '{"path": "README.md"}',
+                        },
+                    )(),
                 },
             )()
         ]

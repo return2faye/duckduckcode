@@ -4,8 +4,14 @@ import json
 from collections.abc import Iterable, Iterator
 from typing import Any
 
-from .event import ConversationEvent, DoneEvent, ErrorEvent, StreamEvent, ToolCallEvent
-from .tool import ToolCall
+from ...core.event import (
+    ConversationEvent,
+    DoneEvent,
+    ErrorEvent,
+    StreamEvent,
+    ToolCallEvent,
+)
+from ...tools.tool import ToolCall
 
 
 class OpenAIStreamEventParser:

@@ -4,16 +4,21 @@ import os
 import unittest
 from unittest.mock import patch
 
-from duckduckcode.agent import Agent
-from duckduckcode.client import ClientResponse
-from duckduckcode.context import ContextManager, Message, ReasoningConfig
-from duckduckcode.event import ConversationEvent, DoneEvent, ErrorEvent, ToolCallEvent
-from duckduckcode.openai_client import OpenAIClient
-from duckduckcode.serialize import (
+from duckduckcode.core.agent import Agent
+from duckduckcode.core.client import ClientResponse
+from duckduckcode.core.context import ContextManager, Message, ReasoningConfig
+from duckduckcode.core.event import (
+    ConversationEvent,
+    DoneEvent,
+    ErrorEvent,
+    ToolCallEvent,
+)
+from duckduckcode.providers.openai.client import OpenAIClient
+from duckduckcode.providers.openai.serialize import (
     OpenAIResponsesDeserializer,
     OpenAIResponsesSerializer,
 )
-from duckduckcode.tool import ToolCall, ToolManager, ToolResult
+from duckduckcode.tools.tool import ToolCall, ToolManager, ToolResult
 
 
 class FakeResponses:

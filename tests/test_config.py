@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from duckduckcode.config import Config
-from duckduckcode.context import ReasoningConfig
+from duckduckcode.core.context import ReasoningConfig
 
 
 class ConfigTest(unittest.TestCase):

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from duckduckcode.config import Config
-from duckduckcode.event import ConversationEvent, DoneEvent
+from duckduckcode.core.event import ConversationEvent, DoneEvent
 from duckduckcode.main import build_agent, run_repl
 
 

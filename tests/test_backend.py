@@ -4,8 +4,8 @@ import io
 import json
 import unittest
 
-from duckduckcode.backend import run_backend
-from duckduckcode.event import ConversationEvent, DoneEvent
+from duckduckcode.core.event import ConversationEvent, DoneEvent
+from duckduckcode.interfaces.backend import run_backend
 
 
 class BackendTest(unittest.TestCase):

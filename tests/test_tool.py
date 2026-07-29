@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from duckduckcode.tool import ToolCall, ToolManager, ToolResult, create_tool
+from duckduckcode.tools.tool import ToolCall, ToolManager, ToolResult, create_tool
 
 
 def raise_error(message: str) -> None:

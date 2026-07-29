@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from duckduckcode.tool import ToolCall, ToolManager, ToolResult
 from duckduckcode.tools.write_file import create_write_file_tool
+from duckduckcode.tools.tool import ToolCall, ToolManager, ToolResult
 
 
 class WriteFileTest(unittest.TestCase):

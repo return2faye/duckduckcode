@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import unittest
 
-from duckduckcode.client import ClientResponse
-from duckduckcode.context import Message, ReasoningConfig
-from duckduckcode.event import ConversationEvent, DoneEvent, ErrorEvent, ToolCallEvent
-from duckduckcode.openai_client import OpenAIClient
-from duckduckcode.stream import OpenAIStreamEventHandler, OpenAIStreamEventParser
-from duckduckcode.tool import ToolCall
+from duckduckcode.core.client import ClientResponse
+from duckduckcode.core.context import Message, ReasoningConfig
+from duckduckcode.core.event import (
+    ConversationEvent,
+    DoneEvent,
+    ErrorEvent,
+    ToolCallEvent,
+)
+from duckduckcode.providers.openai.client import OpenAIClient
+from duckduckcode.providers.openai.stream import (
+    OpenAIStreamEventHandler,
+    OpenAIStreamEventParser,
+)
+from duckduckcode.tools.tool import ToolCall
 
 
 class OpenAIStreamTest(unittest.TestCase):

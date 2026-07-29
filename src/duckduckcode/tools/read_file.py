@@ -6,7 +6,7 @@ from pathlib import Path
 import stat
 from typing import Any
 
-from ..tool import Tool, ToolResult, create_tool
+from .tool import Tool, ToolResult, create_tool
 
 MAX_READ_LINES = 2000
 # ponytail: fixed context guards; make configurable if model contexts diverge.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .tool import ToolCall
+from ..tools.tool import ToolCall
 
 
 @dataclass(frozen=True)

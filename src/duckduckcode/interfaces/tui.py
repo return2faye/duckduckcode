@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
-from .event import ConversationEvent, DoneEvent, ErrorEvent, StreamEvent
+from ..core.event import ConversationEvent, DoneEvent, ErrorEvent, StreamEvent
 
 DUCK = [
     r"  __",

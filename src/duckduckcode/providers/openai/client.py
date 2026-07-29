@@ -5,9 +5,9 @@ from typing import Any
 
 from openai import OpenAI
 
-from .client import Client, ClientResponse
-from .context import Message, ReasoningConfig
-from .event import StreamEvent
+from ...core.client import Client, ClientResponse
+from ...core.context import Message, ReasoningConfig
+from ...core.event import StreamEvent
 from .serialize import (
     MessageDeserializer,
     MessageSerializer,

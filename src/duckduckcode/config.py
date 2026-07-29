@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from dotenv import load_dotenv
 
-from .context import ReasoningConfig
+from .core.context import ReasoningConfig
 
 
 @dataclass(frozen=True)

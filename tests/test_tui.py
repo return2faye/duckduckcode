@@ -9,8 +9,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from duckduckcode.event import ConversationEvent, DoneEvent, ErrorEvent
-from duckduckcode.tui import (
+from duckduckcode.core.event import ConversationEvent, DoneEvent, ErrorEvent
+from duckduckcode.interfaces.tui import (
     PipeBackend,
     _Tui,
     _clip,
@@ -193,12 +193,12 @@ class TuiTest(unittest.TestCase):
         tui._draw = lambda: None
 
         with (
-            patch("duckduckcode.tui.curses.curs_set"),
-            patch("duckduckcode.tui.curses.set_escdelay") as set_escdelay,
-            patch("duckduckcode.tui.curses.mousemask"),
-            patch("duckduckcode.tui._init_colors"),
-            patch("duckduckcode.tui._color", return_value=0),
-            patch("duckduckcode.tui._set_mouse_tracking"),
+            patch("duckduckcode.interfaces.tui.curses.curs_set"),
+            patch("duckduckcode.interfaces.tui.curses.set_escdelay") as set_escdelay,
+            patch("duckduckcode.interfaces.tui.curses.mousemask"),
+            patch("duckduckcode.interfaces.tui._init_colors"),
+            patch("duckduckcode.interfaces.tui._color", return_value=0),
+            patch("duckduckcode.interfaces.tui._set_mouse_tracking"),
         ):
             tui.run()
 
@@ -240,10 +240,13 @@ class TuiTest(unittest.TestCase):
         ]
 
         with (
-            patch("duckduckcode.tui._color", side_effect=lambda pair: pair),
-            patch("duckduckcode.tui.curses.ACS_HLINE", 0, create=True),
-            patch("duckduckcode.tui.curses.ACS_CKBOARD", 0, create=True),
-            patch("duckduckcode.tui.curses.ACS_VLINE", 0, create=True),
+            patch(
+                "duckduckcode.interfaces.tui._color",
+                side_effect=lambda pair: pair,
+            ),
+            patch("duckduckcode.interfaces.tui.curses.ACS_HLINE", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_CKBOARD", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_VLINE", 0, create=True),
         ):
             tui._draw()
 

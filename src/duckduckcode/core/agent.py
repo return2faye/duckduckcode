@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from .client import Client
 from .context import ContextManager
 from .event import ConversationEvent, DoneEvent, ErrorEvent, StreamEvent, ToolCallEvent
-from .tool import ToolManager
+from ..tools.tool import ToolManager
 
 
 class Agent:

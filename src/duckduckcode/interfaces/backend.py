@@ -5,8 +5,8 @@ import signal
 import sys
 from typing import TextIO
 
-from .agent import Agent
-from .event import ConversationEvent, DoneEvent, ErrorEvent, ToolCallEvent
+from ..core.agent import Agent
+from ..core.event import ConversationEvent, DoneEvent, ErrorEvent, ToolCallEvent
 
 
 def run_backend(

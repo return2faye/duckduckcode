@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .tool import ToolCall
+from ..tools.tool import ToolCall
 
 DEFAULT_SYSTEM_PROMPT = """You are DuckDuckCode, a pragmatic coding agent.
 Use the ponytail skill: prefer the smallest correct change, stdlib/native

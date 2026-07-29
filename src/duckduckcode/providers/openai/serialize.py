@@ -4,9 +4,9 @@ from abc import ABC, abstractmethod
 import json
 from typing import Any
 
-from .client import ClientResponse
-from .context import Message, ReasoningConfig
-from .tool import ToolCall
+from ...core.client import ClientResponse
+from ...core.context import Message, ReasoningConfig
+from ...tools.tool import ToolCall
 
 
 class MessageSerializer(ABC):

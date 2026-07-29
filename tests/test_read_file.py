@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from duckduckcode.tool import ToolCall, ToolManager, ToolResult
 from duckduckcode.tools.read_file import create_read_file_tool
+from duckduckcode.tools.tool import ToolCall, ToolManager, ToolResult
 
 
 class ReadFileTest(unittest.TestCase):

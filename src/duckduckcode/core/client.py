@@ -7,7 +7,7 @@ from typing import Any
 
 from .context import Message, ReasoningConfig
 from .event import StreamEvent
-from .tool import ToolCall
+from ..tools.tool import ToolCall
 
 
 @dataclass(frozen=True)

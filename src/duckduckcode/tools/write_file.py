@@ -6,7 +6,7 @@ import stat
 import tempfile
 from typing import Any
 
-from ..tool import Tool, ToolResult, create_tool
+from .tool import Tool, ToolResult, create_tool
 
 WRITE_FILE_PARAMS = {
     "type": "object",

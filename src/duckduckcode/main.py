@@ -4,15 +4,15 @@ import argparse
 import sys
 from typing import TextIO
 
-from .agent import Agent
-from .backend import run_backend
 from .config import Config
-from .context import ContextManager
-from .event import ConversationEvent, ErrorEvent
-from .openai_client import OpenAIClient
-from .tool import ToolManager
+from .core.agent import Agent
+from .core.context import ContextManager
+from .core.event import ConversationEvent, ErrorEvent
+from .interfaces.backend import run_backend
+from .interfaces.tui import run_tui
+from .providers.openai.client import OpenAIClient
 from .tools import create_read_file_tool, create_write_file_tool
-from .tui import run_tui
+from .tools.tool import ToolManager
 
 
 def write_stream_response(

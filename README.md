@@ -1,0 +1,47 @@
+# duckduckcode
+
+Minimal Python coding agent shell using the OpenAI API.
+
+## Setup
+
+```bash
+uv sync
+cp .env.example .env
+```
+
+Set `OPENAI_API_KEY` in `.env`.
+
+Defaults:
+
+- `OPENAI_MODEL=o4-mini`
+- `OPENAI_REASONING_EFFORT=low`
+
+## Chat
+
+```bash
+uv run duckduckcode
+```
+
+DuckDuckCode starts with a greeting, then waits for your input. Type `exit` or `quit` to end the session.
+
+You can also pass one first prompt and exit after the response:
+
+```bash
+uv run duckduckcode "Say hello in one sentence."
+```
+
+## Structure
+
+- `agent.py`: main multi-turn agent flow
+- `client.py`: provider-neutral `Client` abstraction
+- `config.py`: startup configuration loaded from environment variables
+- `context.py`: `Message` object, system prompt, abstraction, tool schemas, and in-memory `ContextManager`
+- `openai_client.py`: OpenAI Responses API implementation
+- `serialize.py`: provider-specific message serializers and response deserializers
+- `tool.py`: `ToolManager`, tool schemas, and tool-call execution
+
+`ContextManager` builds the model context: system prompt first, optional abstraction summary second, then user, assistant, tool-call, and tool-result messages. There is no persistent memory layer yet.
+
+`Agent` owns `ToolManager`, passes tool schemas into `ContextManager`, executes returned tool calls, appends the tool call/result messages, then asks the model again for the final answer.
+
+The default model is `o4-mini`, a reasoning model. Reasoning effort defaults to `low`; CLI selection can be added later.

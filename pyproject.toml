@@ -1,0 +1,20 @@
+[project]
+name = "duckduckcode"
+version = "0.1.0"
+description = "Minimal Python coding agent shell backed by the OpenAI API"
+readme = "README.md"
+authors = [
+    { name = "return2faye", email = "chongzhenma@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=2.50.0",
+    "python-dotenv>=1.2.2",
+]
+
+[project.scripts]
+duckduckcode = "duckduckcode.main:main"
+
+[build-system]
+requires = ["uv_build>=0.11.19,<0.12.0"]
+build-backend = "uv_build"

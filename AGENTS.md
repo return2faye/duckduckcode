@@ -8,6 +8,8 @@ Build this project as a minimal Python coding agent.
 - Keep provider-neutral client contracts in `client.py`.
 - Keep `Message`, system prompt, abstraction summary, tool schemas, and conversation history handling in `context.py`.
 - Keep provider-specific message serializers/deserializers in `serialize.py` and inject them into clients.
+- Keep streaming event objects in `event.py`; keep provider-specific SSE parsing/handling in `stream.py` and inject handlers into clients.
+- During streaming, create one assistant placeholder message, append text deltas into it, and end with `completed` or `error`; keep token usage on `Message` until real token accounting is requested.
 - `ContextManager.model_messages()` should put the system prompt first, optional abstraction second, then user/LLM conversation messages, to improve KV-cache reuse.
 - Use the OpenAI Responses API through `OpenAIClient`, as one `Client` implementation.
 - Use `o4-mini` as the default thinking/reasoning model unless `OPENAI_MODEL` overrides it.

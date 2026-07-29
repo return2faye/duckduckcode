@@ -7,7 +7,21 @@ from typing import TextIO
 from .agent import Agent
 from .config import Config
 from .context import ContextManager
+from .event import ConversationEvent, ErrorEvent
 from .openai_client import OpenAIClient
+
+
+def write_stream_response(
+    agent: Agent, prompt: str, output_stream: TextIO = sys.stdout
+) -> None:
+    for event in agent.stream(prompt):
+        if isinstance(event, ConversationEvent):
+            output_stream.write(event.delta)
+            output_stream.flush()
+        elif isinstance(event, ErrorEvent):
+            output_stream.write(f"\nerror: {event.message}")
+            break
+    output_stream.write("\n")
 
 
 def run_repl(
@@ -15,7 +29,9 @@ def run_repl(
     input_stream: TextIO = sys.stdin,
     output_stream: TextIO = sys.stdout,
 ) -> None:
-    output_stream.write("duckduckcode: 你好，我是 DuckDuckCode。输入 exit 或 quit 结束。\n")
+    output_stream.write(
+        "duckduckcode: 你好，我是 DuckDuckCode。输入 exit 或 quit 结束。\n"
+    )
 
     while True:
         output_stream.write("you: ")
@@ -31,7 +47,8 @@ def run_repl(
         if not user_message:
             continue
 
-        output_stream.write(f"duckduckcode: {agent.ask(user_message)}\n")
+        output_stream.write("duckduckcode: ")
+        write_stream_response(agent, user_message, output_stream)
 
 
 def main() -> None:
@@ -47,7 +64,7 @@ def main() -> None:
         )
         first_prompt = " ".join(args.prompt).strip()
         if first_prompt:
-            print(agent.ask(first_prompt))
+            write_stream_response(agent, first_prompt)
             return
         run_repl(agent)
     except RuntimeError as exc:

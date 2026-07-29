@@ -36,8 +36,10 @@ uv run duckduckcode "Say hello in one sentence."
 - `client.py`: provider-neutral `Client` abstraction
 - `config.py`: startup configuration loaded from environment variables
 - `context.py`: `Message` object, system prompt, abstraction, tool schemas, and in-memory `ContextManager`
+- `event.py`: internal streaming events such as `ConversationEvent`, `ToolCallEvent`, and `ErrorEvent`
 - `openai_client.py`: OpenAI Responses API implementation
 - `serialize.py`: provider-specific message serializers and response deserializers
+- `stream.py`: OpenAI SSE event parser and event handler
 - `tool.py`: `ToolManager`, tool schemas, and tool-call execution
 
 `ContextManager` builds the model context: system prompt first, optional abstraction summary second, then user, assistant, tool-call, and tool-result messages. There is no persistent memory layer yet.
@@ -45,3 +47,7 @@ uv run duckduckcode "Say hello in one sentence."
 `Agent` owns `ToolManager`, passes tool schemas into `ContextManager`, executes returned tool calls, appends the tool call/result messages, then asks the model again for the final answer.
 
 The default model is `o4-mini`, a reasoning model. Reasoning effort defaults to `low`; CLI selection can be added later.
+
+`OpenAIClient.stream()` uses Responses API SSE streaming and yields internal stream events. The parser currently handles text deltas, function tool calls, errors, and completion.
+
+During streaming, `Agent.stream()` creates an empty assistant message, appends text deltas into it, then marks it `completed` or `error`. `Message.token_usage` records returned usage for now; token accounting can be added later.

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from .client import Client
 from .context import ContextManager
+from .event import ConversationEvent, DoneEvent, ErrorEvent, StreamEvent, ToolCallEvent
 from .tool import ToolManager
 
 
@@ -18,22 +21,35 @@ class Agent:
         self.tools = tools or ToolManager()
         self.max_tool_rounds = max_tool_rounds
 
-    def ask(self, user_message: str) -> str:
+    def stream(self, user_message: str) -> Iterator[StreamEvent]:
         self.context.add_user(user_message)
         self.context.set_tool_schemas(self.tools.schemas())
 
-        for _ in range(self.max_tool_rounds):
-            response = self.client.generate(
-                self.context.model_messages(),
+        for _ in range(self.max_tool_rounds + 1):
+            messages = self.context.model_messages()
+            assistant_index = self.context.start_assistant_stream()
+            tool_called = False
+
+            for event in self.client.stream(
+                messages,
                 tools=self.context.tool_schemas(),
                 reasoning=self.context.reasoning,
-            )
-            if not response.tool_calls:
-                self.context.add_assistant(response.text)
-                return response.text
+            ):
+                if isinstance(event, ConversationEvent):
+                    self.context.append_assistant_delta(assistant_index, event.delta)
+                elif isinstance(event, ToolCallEvent):
+                    tool_called = True
+                    self.context.add_tool_call(event.tool_call)
+                    self.context.add_tool_result(
+                        event.tool_call.call_id, self.tools.execute(event.tool_call)
+                    )
+                elif isinstance(event, DoneEvent):
+                    self.context.finish_assistant_stream(
+                        assistant_index, event.token_usage
+                    )
+                elif isinstance(event, ErrorEvent):
+                    self.context.fail_assistant_stream(assistant_index)
+                yield event
 
-            for tool_call in response.tool_calls:
-                self.context.add_tool_call(tool_call)
-                self.context.add_tool_result(tool_call.call_id, self.tools.execute(tool_call))
-
-        raise RuntimeError("Too many tool calls")
+            if not tool_called:
+                break

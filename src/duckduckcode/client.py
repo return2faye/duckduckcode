@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from collections.abc import Iterator
 from typing import Any
 
 from .context import Message, ReasoningConfig
+from .event import StreamEvent
 from .tool import ToolCall
 
 
@@ -19,11 +21,12 @@ class ClientResponse:
 
 
 class Client(ABC):
+
     @abstractmethod
-    def generate(
+    def stream(
         self,
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
         reasoning: ReasoningConfig | None = None,
-    ) -> ClientResponse:
+    ) -> Iterator[StreamEvent]:
         raise NotImplementedError

@@ -10,13 +10,13 @@ from duckduckcode.main import build_agent, run_repl
 
 
 class MainTest(unittest.TestCase):
-    def test_build_agent_registers_read_file(self) -> None:
+    def test_build_agent_registers_core_file_tools(self) -> None:
         with patch("duckduckcode.main.OpenAIClient", return_value=object()):
             agent = build_agent(Config("test-key"))
 
         self.assertEqual(
             [schema["name"] for schema in agent.tools.schemas()],
-            ["ReadFile"],
+            ["ReadFile", "WriteFile"],
         )
 
     def test_repl_streams_agent_responses_for_multiple_turns(self) -> None:

@@ -22,7 +22,13 @@ Defaults:
 uv run duckduckcode
 ```
 
-DuckDuckCode starts with a greeting, then waits for your input. Type `exit` or `quit` to end the session.
+DuckDuckCode starts the TUI by default. The upper area shows the duck banner, version, working directory, and chat history. The lower input area accepts prompts, and the bottom status bar shows the model and token usage. Press `Esc` to interrupt a response, or press it while idle to exit.
+
+The old line REPL is still available:
+
+```bash
+uv run duckduckcode --repl
+```
 
 You can also pass one first prompt and exit after the response:
 
@@ -33,6 +39,7 @@ uv run duckduckcode "Say hello in one sentence."
 ## Structure
 
 - `agent.py`: main multi-turn agent flow
+- `backend.py`: JSONL pipe backend used by the TUI frontend
 - `client.py`: provider-neutral `Client` abstraction
 - `config.py`: startup configuration loaded from environment variables
 - `context.py`: `Message` object, system prompt, abstraction, tool schemas, and in-memory `ContextManager`
@@ -40,6 +47,7 @@ uv run duckduckcode "Say hello in one sentence."
 - `openai_client.py`: OpenAI Responses API implementation
 - `serialize.py`: provider-specific message serializers and response deserializers
 - `stream.py`: OpenAI SSE event parser and event handler
+- `tui.py`: curses frontend that talks to the backend through stdin/stdout pipes
 - `tool.py`: `ToolManager`, tool schemas, and tool-call execution
 
 `ContextManager` builds the model context: system prompt first, optional abstraction summary second, then user, assistant, tool-call, and tool-result messages. There is no persistent memory layer yet.

@@ -438,6 +438,27 @@ class AgentTest(unittest.TestCase):
             ],
         )
 
+    def test_closing_stream_preserves_partial_assistant_message(self) -> None:
+        class FakeClient:
+            def stream(self, messages, tools=None, reasoning=None):
+                yield ConversationEvent("partial")
+                while True:
+                    yield ConversationEvent("more")
+
+        context = ContextManager()
+        stream = Agent(FakeClient(), context).stream("hello")
+
+        self.assertEqual(next(stream), ConversationEvent("partial"))
+        stream.close()
+
+        self.assertEqual(
+            context.messages(),
+            [
+                Message("user", "hello"),
+                Message("assistant", "partial", status="error", token_usage=0),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,10 +41,15 @@ class OpenAIStreamEventHandler:
         self.parser = parser or OpenAIStreamEventParser()
 
     def handle(self, events: Iterable[Any]) -> Iterator[StreamEvent]:
-        for event in events:
-            parsed = self.parser.parse(event)
-            if parsed is not None:
-                yield parsed
+        try:
+            for event in events:
+                parsed = self.parser.parse(event)
+                if parsed is not None:
+                    yield parsed
+        finally:
+            close = getattr(events, "close", None)
+            if close is not None:
+                close()
 
 
 def _tool_call_from_event(event: Any) -> ToolCall:

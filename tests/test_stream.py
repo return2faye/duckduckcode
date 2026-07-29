@@ -75,6 +75,31 @@ class OpenAIStreamTest(unittest.TestCase):
             list(OpenAIStreamEventHandler().handle(events)), [ConversationEvent("hi")]
         )
 
+    def test_closing_handler_closes_provider_stream(self) -> None:
+        class Events:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def __iter__(self):
+                yield type(
+                    "Event",
+                    (),
+                    {"type": "response.output_text.delta", "delta": "hi"},
+                )()
+                while True:
+                    yield type("Event", (), {"type": "response.created"})()
+
+            def close(self):
+                self.closed = True
+
+        events = Events()
+        stream = OpenAIStreamEventHandler().handle(events)
+
+        self.assertEqual(next(stream), ConversationEvent("hi"))
+        stream.close()
+
+        self.assertTrue(events.closed)
+
     def test_openai_client_stream_uses_handler_and_stream_true(self) -> None:
         class FakeResponses:
             def __init__(self) -> None:

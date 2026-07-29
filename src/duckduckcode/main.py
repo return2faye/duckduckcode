@@ -5,10 +5,12 @@ import sys
 from typing import TextIO
 
 from .agent import Agent
+from .backend import run_backend
 from .config import Config
 from .context import ContextManager
 from .event import ConversationEvent, ErrorEvent
 from .openai_client import OpenAIClient
+from .tui import run_tui
 
 
 def write_stream_response(
@@ -53,19 +55,38 @@ def run_repl(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Start a DuckDuckCode chat session.")
+    parser.add_argument("--backend", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--repl", action="store_true", help="Use the simple line REPL.")
     parser.add_argument("prompt", nargs="*", help="Optional first prompt.")
     args = parser.parse_args()
 
     try:
         config = Config.from_env()
-        agent = Agent(
-            OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
-            ContextManager(reasoning=config.reasoning),
-        )
+        agent = build_agent(config)
+        if args.backend:
+            run_backend(agent)
+            return
+
         first_prompt = " ".join(args.prompt).strip()
+        if args.repl:
+            run_repl(agent)
+            return
+        if not first_prompt or first_prompt == "tui":
+            run_tui(config.openai_model)
+            return
         if first_prompt:
             write_stream_response(agent, first_prompt)
             return
-        run_repl(agent)
     except RuntimeError as exc:
         parser.exit(1, f"duckduckcode: error: {exc}\n")
+
+
+def build_agent(config: Config) -> Agent:
+    return Agent(
+        OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
+        ContextManager(reasoning=config.reasoning),
+    )
+
+
+if __name__ == "__main__":
+    main()

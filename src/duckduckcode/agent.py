@@ -29,27 +29,36 @@ class Agent:
             messages = self.context.model_messages()
             assistant_index = self.context.start_assistant_stream()
             tool_called = False
+            stream_finished = False
 
-            for event in self.client.stream(
-                messages,
-                tools=self.context.tool_schemas(),
-                reasoning=self.context.reasoning,
-            ):
-                if isinstance(event, ConversationEvent):
-                    self.context.append_assistant_delta(assistant_index, event.delta)
-                elif isinstance(event, ToolCallEvent):
-                    tool_called = True
-                    self.context.add_tool_call(event.tool_call)
-                    self.context.add_tool_result(
-                        event.tool_call.call_id, self.tools.execute(event.tool_call)
-                    )
-                elif isinstance(event, DoneEvent):
-                    self.context.finish_assistant_stream(
-                        assistant_index, event.token_usage
-                    )
-                elif isinstance(event, ErrorEvent):
+            try:
+                for event in self.client.stream(
+                    messages,
+                    tools=self.context.tool_schemas(),
+                    reasoning=self.context.reasoning,
+                ):
+                    if isinstance(event, ConversationEvent):
+                        self.context.append_assistant_delta(
+                            assistant_index, event.delta
+                        )
+                    elif isinstance(event, ToolCallEvent):
+                        tool_called = True
+                        self.context.add_tool_call(event.tool_call)
+                        self.context.add_tool_result(
+                            event.tool_call.call_id, self.tools.execute(event.tool_call)
+                        )
+                    elif isinstance(event, DoneEvent):
+                        self.context.finish_assistant_stream(
+                            assistant_index, event.token_usage
+                        )
+                        stream_finished = True
+                    elif isinstance(event, ErrorEvent):
+                        self.context.fail_assistant_stream(assistant_index)
+                        stream_finished = True
+                    yield event
+            finally:
+                if not stream_finished:
                     self.context.fail_assistant_stream(assistant_index)
-                yield event
 
             if not tool_called:
                 break

@@ -45,7 +45,8 @@ class Agent:
                         tool_called = True
                         self.context.add_tool_call(event.tool_call)
                         self.context.add_tool_result(
-                            event.tool_call.call_id, self.tools.execute(event.tool_call)
+                            event.tool_call.call_id,
+                            self.tools.execute(event.tool_call).to_model_output(),
                         )
                     elif isinstance(event, DoneEvent):
                         self.context.finish_assistant_stream(

@@ -11,7 +11,7 @@ from .serialize import (
     OpenAIResponsesSerializer,
 )
 from .stream import OpenAIStreamEventHandler, OpenAIStreamEventParser
-from .tool import ToolCall, ToolManager
+from .tool import Tool, ToolCall, ToolManager, ToolResult, create_tool
 
 __all__ = [
     "Agent",
@@ -32,7 +32,10 @@ __all__ = [
     "OpenAIStreamEventParser",
     "ReasoningConfig",
     "StreamEvent",
+    "Tool",
     "ToolCall",
     "ToolCallEvent",
     "ToolManager",
+    "ToolResult",
+    "create_tool",
 ]

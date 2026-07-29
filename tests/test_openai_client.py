@@ -13,7 +13,7 @@ from duckduckcode.serialize import (
     OpenAIResponsesDeserializer,
     OpenAIResponsesSerializer,
 )
-from duckduckcode.tool import ToolCall, ToolManager
+from duckduckcode.tool import ToolCall, ToolManager, ToolResult
 
 
 class FakeResponses:
@@ -301,7 +301,8 @@ class ToolManagerTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            manager.execute(ToolCall("call_1", "echo", {"text": "hello"})), "hello"
+            manager.execute(ToolCall("call_1", "echo", {"text": "hello"})),
+            ToolResult("hello"),
         )
 
 
@@ -386,11 +387,51 @@ class AgentTest(unittest.TestCase):
                 Message("user", "use tool"),
                 Message("assistant", "", status="completed", token_usage=0),
                 Message.tool_call("call_1", "echo", {"text": "hello"}),
-                Message.tool_result("call_1", "hello"),
+                Message.tool_result("call_1", '{"content": "hello", "isError": false}'),
                 Message("assistant", "done", status="completed", token_usage=0),
             ],
         )
         self.assertEqual(calls[0][1], tool_manager.schemas())
+
+    def test_stream_returns_tool_errors_to_the_model(self) -> None:
+        calls = []
+        tool_manager = ToolManager()
+
+        def fail() -> None:
+            raise ValueError("failed")
+
+        tool_manager.register(
+            "fail",
+            "Fail",
+            {"type": "object", "properties": {}},
+            fail,
+        )
+
+        class FakeClient:
+            def stream(self, messages, tools=None, reasoning=None):
+                calls.append(list(messages))
+                if len(calls) == 1:
+                    yield ToolCallEvent(ToolCall("call_1", "fail", {}))
+                    yield DoneEvent()
+                    return
+                yield ConversationEvent("recovered")
+                yield DoneEvent()
+
+        context = ContextManager()
+
+        self.assertEqual(
+            list(Agent(FakeClient(), context, tool_manager).stream("use tool")),
+            [
+                ToolCallEvent(ToolCall("call_1", "fail", {})),
+                DoneEvent(),
+                ConversationEvent("recovered"),
+                DoneEvent(),
+            ],
+        )
+        self.assertIn(
+            Message.tool_result("call_1", '{"content": "failed", "isError": true}'),
+            calls[1],
+        )
 
     def test_stream_adds_placeholder_and_appends_conversation_events(self) -> None:
         class FakeClient:

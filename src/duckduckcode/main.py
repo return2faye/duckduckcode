@@ -15,6 +15,7 @@ from .providers.openai.client import OpenAIClient
 from .tools import (
     create_edit_file_tool,
     create_glob_tool,
+    create_grep_tool,
     create_read_file_tool,
     create_write_file_tool,
 )
@@ -96,6 +97,7 @@ def build_agent(config: Config, workspace: Path) -> Agent:
     tools.register(create_write_file_tool(workspace))
     tools.register(create_edit_file_tool(workspace))
     tools.register(create_glob_tool(workspace))
+    tools.register(create_grep_tool(workspace))
     return Agent(
         OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
         ContextManager(reasoning=config.reasoning),

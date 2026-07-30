@@ -28,6 +28,7 @@ EXPECTED_MODULES = {
     "tools/__init__.py",
     "tools/edit_file.py",
     "tools/glob.py",
+    "tools/grep.py",
     "tools/read_file.py",
     "tools/tool.py",
     "tools/write_file.py",

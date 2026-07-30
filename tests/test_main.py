@@ -19,7 +19,7 @@ class MainTest(unittest.TestCase):
 
         self.assertEqual(
             [schema["name"] for schema in agent.tools.schemas()],
-            ["ReadFile", "WriteFile", "EditFile", "Glob"],
+            ["ReadFile", "WriteFile", "EditFile", "Glob", "Grep"],
         )
 
     def test_build_agent_injects_one_workspace_into_all_file_tools(self) -> None:
@@ -58,14 +58,28 @@ class MainTest(unittest.TestCase):
             found = agent.tools.execute(
                 ToolCall("glob", "Glob", {"pattern": "*.txt", "path": None})
             )
+            searched = agent.tools.execute(
+                ToolCall(
+                    "grep",
+                    "Grep",
+                    {
+                        "pattern": "edited",
+                        "path": None,
+                        "glob": "*.txt",
+                        "context": 0,
+                    },
+                )
+            )
 
             self.assertFalse(read.is_error)
             self.assertFalse(edit.is_error)
             self.assertFalse(write.is_error)
             self.assertFalse(found.is_error)
+            self.assertFalse(searched.is_error)
             self.assertEqual(source.read_text(encoding="utf-8"), "edited")
             self.assertEqual((workspace / "new.txt").read_text(encoding="utf-8"), "new")
             self.assertEqual(set(found.content.splitlines()), {"new.txt", "source.txt"})
+            self.assertEqual(searched.content, "source.txt:1:edited")
 
     def test_repl_streams_agent_responses_for_multiple_turns(self) -> None:
         calls = []

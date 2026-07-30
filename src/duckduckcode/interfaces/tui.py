@@ -27,6 +27,7 @@ from ..core.event import (
     TurnCompleteEvent,
     UsageEvent,
 )
+from .slash_command import handle_slash_command, slash_command_suggestions
 
 DUCK = [
     r"  __",
@@ -131,6 +132,7 @@ class _Tui:
         self._interrupting = False
         self._permission_request: PermissionRequestEvent | None = None
         self._permission_selection = len(PERMISSION_OPTIONS) - 1
+        self._slash_selection = 0
 
     def run(self) -> None:
         curses.curs_set(1)
@@ -155,6 +157,8 @@ class _Tui:
                     "\x03",
                 }:
                     self._handle_permission_key(key)
+                    continue
+                if self._handle_slash_key(key):
                     continue
                 if key in {3, "\x03"}:
                     if self._copy_selection():
@@ -224,6 +228,14 @@ class _Tui:
             return
 
         self.scroll_offset = 0
+        slash_command = handle_slash_command(prompt)
+        if slash_command is not None:
+            self.messages.append(slash_command)
+            self.input = ""
+            self.cursor_index = 0
+            self.selection_anchor = None
+            return
+
         self.messages.append(("you", prompt))
         self.messages.append(("duckduckcode", ""))
         self._events = queue.Queue()
@@ -348,6 +360,27 @@ class _Tui:
         self.backend.respond_permission(request.call_id, choice)
         self._permission_request = None
 
+    def _handle_slash_key(self, key: object) -> bool:
+        suggestions = slash_command_suggestions(self.input)
+        if suggestions is None:
+            return False
+        if key == curses.KEY_UP:
+            if suggestions:
+                self._slash_selection = (self._slash_selection - 1) % len(suggestions)
+            return True
+        if key == curses.KEY_DOWN:
+            if suggestions:
+                self._slash_selection = (self._slash_selection + 1) % len(suggestions)
+            return True
+        if key in {10, 13, "\n", "\r"} and suggestions:
+            self._slash_selection %= len(suggestions)
+            self.input = suggestions[self._slash_selection][0]
+            self.cursor_index = len(self.input)
+            self.selection_anchor = None
+            self._send()
+            return True
+        return False
+
     def _selection(self) -> tuple[int, int] | None:
         if self.selection_anchor is None or self.selection_anchor == self.cursor_index:
             return None
@@ -378,6 +411,7 @@ class _Tui:
         self.input = self.input[:start] + text + self.input[end:]
         self.cursor_index = start + len(text)
         self.selection_anchor = None
+        self._slash_selection = 0
 
     def _insert_text(self, text: str) -> None:
         self._replace_selection(text)
@@ -390,6 +424,7 @@ class _Tui:
                 self.input[: self.cursor_index - 1] + self.input[self.cursor_index :]
             )
             self.cursor_index -= 1
+            self._slash_selection = 0
 
     def _delete_forward(self) -> None:
         if self._selection() is not None:
@@ -398,6 +433,7 @@ class _Tui:
             self.input = (
                 self.input[: self.cursor_index] + self.input[self.cursor_index + 1 :]
             )
+            self._slash_selection = 0
 
     def _copy_selection(self) -> bool:
         selection = self._selection()
@@ -455,11 +491,24 @@ class _Tui:
         permission_height = (
             len(PERMISSION_OPTIONS) + 3 if self._permission_request is not None else 0
         )
+        slash_suggestions = (
+            slash_command_suggestions(self.input)
+            if self._permission_request is None
+            else None
+        )
+        if slash_suggestions:
+            self._slash_selection = min(
+                self._slash_selection, len(slash_suggestions) - 1
+            )
+        slash_height = (
+            max(1, len(slash_suggestions)) + 1 if slash_suggestions is not None else 0
+        )
+        panel_height = permission_height or slash_height
         max_input_rows = max(
             1,
             min(
                 height // 3,
-                height - header_height - permission_height - 3,
+                height - header_height - panel_height - 3,
             ),
         )
         first_input_row = min(
@@ -469,7 +518,7 @@ class _Tui:
         visible_input = input_rows[first_input_row : first_input_row + max_input_rows]
         input_y = max(
             header_height,
-            height - len(visible_input) - permission_height - 3,
+            height - len(visible_input) - panel_height - 3,
         )
 
         for index, line in enumerate(DUCK):
@@ -598,6 +647,13 @@ class _Tui:
                 width,
                 separator,
             )
+        elif slash_suggestions is not None:
+            self._draw_slash_panel(
+                input_y + len(visible_input) + 2,
+                width,
+                separator,
+                slash_suggestions,
+            )
         self.screen.move(
             input_y + 1 + cursor_row - first_input_row,
             min(width - 1, cursor_column + 2),
@@ -640,6 +696,42 @@ class _Tui:
             )
         self.screen.hline(
             top + 2 + len(PERMISSION_OPTIONS),
+            0,
+            curses.ACS_HLINE,
+            width,
+            separator,
+        )
+
+    def _draw_slash_panel(
+        self,
+        top: int,
+        width: int,
+        separator: int,
+        suggestions: list[tuple[str, str]],
+    ) -> None:
+        if not suggestions:
+            self.screen.addstr(
+                top,
+                2,
+                _clip("No matching commands", max(1, width - 2)),
+                _color(MUTED_COLOR),
+            )
+        for index, (name, description) in enumerate(suggestions):
+            attributes = _color(TEXT_COLOR)
+            if index == self._slash_selection:
+                attributes |= curses.A_REVERSE
+            self.screen.addstr(
+                top + index,
+                2,
+                _clip(
+                    ("› " if index == self._slash_selection else "  ")
+                    + f"{name}  {description}",
+                    max(1, width - 2),
+                ),
+                attributes,
+            )
+        self.screen.hline(
+            top + max(1, len(suggestions)),
             0,
             curses.ACS_HLINE,
             width,

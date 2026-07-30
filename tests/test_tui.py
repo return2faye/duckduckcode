@@ -19,6 +19,7 @@ from duckduckcode.core.event import (
     TurnCompleteEvent,
     UsageEvent,
 )
+from duckduckcode.interfaces import slash_command as slash_command_module
 from duckduckcode.interfaces import tui as tui_module
 from duckduckcode.interfaces.tui import (
     PipeBackend,
@@ -274,6 +275,77 @@ class TuiTest(unittest.TestCase):
 
         self.assertEqual(tui.input, "   ")
         self.assertEqual(tui.cursor_index, 2)
+
+    def test_slash_commands_are_handled_without_starting_the_backend(self) -> None:
+        cases = [
+            (
+                "/help",
+                (
+                    "duckduckcode",
+                    "Available slash commands:\n/help  Show available commands",
+                ),
+            ),
+            (
+                "/missing",
+                ("error", "Unknown command '/missing'. Use /help to list commands."),
+            ),
+        ]
+        for prompt, expected_message in cases:
+            with self.subTest(prompt=prompt):
+                tui = _Tui(object(), "model", "/tmp", object())
+                tui.input = prompt
+                tui.cursor_index = len(prompt)
+
+                tui._send()
+
+                self.assertEqual(tui.messages, [expected_message])
+                self.assertIsNone(tui._events)
+                self.assertEqual(tui.input, "")
+                self.assertEqual(tui.cursor_index, 0)
+
+    def test_slash_command_suggestions_filter_by_prefix(self) -> None:
+        suggestions = getattr(
+            slash_command_module,
+            "slash_command_suggestions",
+            lambda _text: None,
+        )
+
+        self.assertEqual(
+            suggestions("/h"),
+            [("/help", "Show available commands")],
+        )
+        self.assertEqual(suggestions("/missing"), [])
+        self.assertIsNone(suggestions("hello"))
+
+    def test_slash_dropdown_uses_arrows_and_enter(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        tui.input = "/"
+        tui.cursor_index = 1
+        handler = getattr(tui, "_handle_slash_key", lambda _key: False)
+        suggestions = [
+            ("/other", "Other command"),
+            ("/help", "Show available commands"),
+        ]
+
+        with patch(
+            "duckduckcode.interfaces.tui.slash_command_suggestions",
+            return_value=suggestions,
+            create=True,
+        ):
+            self.assertTrue(handler(curses.KEY_DOWN))
+            self.assertEqual(getattr(tui, "_slash_selection", None), 1)
+            self.assertTrue(handler("\n"))
+
+        self.assertEqual(
+            tui.messages,
+            [
+                (
+                    "duckduckcode",
+                    "Available slash commands:\n/help  Show available commands",
+                )
+            ],
+        )
+        self.assertIsNone(tui._events)
 
     def test_escape_interrupts_generation_then_exits_when_idle(self) -> None:
         class FakeBackend:
@@ -725,6 +797,58 @@ class TuiTest(unittest.TestCase):
         self.assertLess(history_row, input_row)
         self.assertLess(input_row, panel_row)
         self.assertLess(panel_row, status_row)
+
+    def test_slash_dropdown_is_below_input_without_covering_chat(self) -> None:
+        class FakeScreen:
+            def __init__(self) -> None:
+                self.strings = []
+
+            def erase(self):
+                pass
+
+            def getmaxyx(self):
+                return 18, 60
+
+            def addstr(self, *args):
+                self.strings.append(args)
+
+            def hline(self, *args):
+                pass
+
+            def addch(self, *args):
+                pass
+
+            def move(self, *args):
+                pass
+
+            def refresh(self):
+                pass
+
+        screen = FakeScreen()
+        tui = _Tui(screen, "model", "/tmp", object())
+        tui.messages = [("you", "history")]
+        tui.input = "/h"
+        tui.cursor_index = len(tui.input)
+
+        with (
+            patch("duckduckcode.interfaces.tui._color", return_value=0),
+            patch("duckduckcode.interfaces.tui.curses.ACS_HLINE", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_CKBOARD", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_VLINE", 0, create=True),
+        ):
+            tui._draw()
+
+        history_row = next(args[0] for args in screen.strings if args[2] == "history")
+        input_row = next(args[0] for args in screen.strings if args[2] == "›")
+        command_rows = [
+            args[0] for args in screen.strings if len(args) >= 3 and "/help" in args[2]
+        ]
+        status_row = next(args[0] for args in screen.strings if args[2] == "model")
+
+        self.assertEqual(len(command_rows), 1)
+        self.assertLess(history_row, input_row)
+        self.assertLess(input_row, command_rows[0])
+        self.assertLess(command_rows[0], status_row)
 
 
 if __name__ == "__main__":

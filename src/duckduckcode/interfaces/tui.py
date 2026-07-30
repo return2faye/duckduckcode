@@ -452,16 +452,25 @@ class _Tui:
         self._input_width = max(1, width - 3)
         input_rows = _input_rows(self.input, self._input_width)
         cursor_row, cursor_column = _cursor_position(input_rows, self.cursor_index)
+        permission_height = (
+            len(PERMISSION_OPTIONS) + 3 if self._permission_request is not None else 0
+        )
         max_input_rows = max(
             1,
-            min(height // 3, height - header_height - 3),
+            min(
+                height // 3,
+                height - header_height - permission_height - 3,
+            ),
         )
         first_input_row = min(
             max(0, cursor_row - max_input_rows + 1),
             max(0, len(input_rows) - max_input_rows),
         )
         visible_input = input_rows[first_input_row : first_input_row + max_input_rows]
-        input_y = max(header_height, height - len(visible_input) - 3)
+        input_y = max(
+            header_height,
+            height - len(visible_input) - permission_height - 3,
+        )
 
         for index, line in enumerate(DUCK):
             self.screen.addstr(index, 0, _clip(line, width), _color(DUCK_COLOR))
@@ -584,49 +593,58 @@ class _Tui:
                 _color(MUTED_COLOR) | curses.A_DIM,
             )
         if self._permission_request is not None:
-            self._draw_permission_dialog(height, width)
+            self._draw_permission_panel(
+                input_y + len(visible_input) + 2,
+                width,
+                separator,
+            )
         self.screen.move(
             input_y + 1 + cursor_row - first_input_row,
             min(width - 1, cursor_column + 2),
         )
         self.screen.refresh()
 
-    def _draw_permission_dialog(self, height: int, width: int) -> None:
+    def _draw_permission_panel(
+        self,
+        top: int,
+        width: int,
+        separator: int,
+    ) -> None:
         request = self._permission_request
         if request is None:
             return
-        dialog_width = max(1, min(72, width - 4))
-        dialog_height = len(PERMISSION_OPTIONS) + 4
-        top = max(0, (height - dialog_height) // 2)
-        left = max(0, (width - dialog_width) // 2)
-        background = _color(MUTED_COLOR)
-        for row in range(dialog_height):
-            self.screen.addstr(top + row, left, " " * dialog_width, background)
+        self.screen.addstr(
+            top,
+            0,
+            _clip(f"? {request.name} 请求权限", width),
+            _color(DUCK_COLOR) | curses.A_BOLD,
+        )
         self.screen.addstr(
             top + 1,
-            left + 2,
-            _clip(f"{request.name} 请求权限", max(1, dialog_width - 4)),
-            background | curses.A_BOLD,
-        )
-        self.screen.addstr(
-            top + 2,
-            left + 2,
-            _clip(request.content, max(1, dialog_width - 4)),
-            background,
+            2,
+            _clip(request.content, max(1, width - 2)),
+            _color(MUTED_COLOR),
         )
         for index, (_, label) in enumerate(PERMISSION_OPTIONS):
-            attributes = background
+            attributes = _color(TEXT_COLOR)
             if index == self._permission_selection:
                 attributes |= curses.A_REVERSE
             self.screen.addstr(
-                top + 3 + index,
-                left + 2,
+                top + 2 + index,
+                2,
                 _clip(
                     ("› " if index == self._permission_selection else "  ") + label,
-                    max(1, dialog_width - 4),
+                    max(1, width - 2),
                 ),
                 attributes,
             )
+        self.screen.hline(
+            top + 2 + len(PERMISSION_OPTIONS),
+            0,
+            curses.ACS_HLINE,
+            width,
+            separator,
+        )
 
     def _read_sgr_mouse(self) -> tuple[int, int, int, bool] | None:
         sequence = ""

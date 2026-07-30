@@ -670,6 +670,62 @@ class TuiTest(unittest.TestCase):
 
         self.assertEqual(screen.cursor, (12, 4))
 
+    def test_permission_panel_is_below_input_without_covering_chat(self) -> None:
+        class FakeScreen:
+            def __init__(self) -> None:
+                self.strings = []
+
+            def erase(self):
+                pass
+
+            def getmaxyx(self):
+                return 24, 60
+
+            def addstr(self, *args):
+                self.strings.append(args)
+
+            def hline(self, *args):
+                pass
+
+            def addch(self, *args):
+                pass
+
+            def move(self, *args):
+                pass
+
+            def refresh(self):
+                pass
+
+        screen = FakeScreen()
+        tui = _Tui(screen, "model", "/tmp", object())
+        tui.messages = [("you", "history")]
+        tui.input = "next request"
+        tui.cursor_index = len(tui.input)
+        tui._permission_request = PermissionRequestEvent(
+            "call_1", "Bash", "pwd", "approval required"
+        )
+
+        with (
+            patch("duckduckcode.interfaces.tui._color", return_value=0),
+            patch("duckduckcode.interfaces.tui.curses.ACS_HLINE", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_CKBOARD", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_VLINE", 0, create=True),
+        ):
+            tui._draw()
+
+        history_row = next(args[0] for args in screen.strings if args[2] == "history")
+        input_row = next(args[0] for args in screen.strings if args[2] == "›")
+        panel_row = next(
+            args[0]
+            for args in screen.strings
+            if len(args) >= 3 and "请求权限" in args[2]
+        )
+        status_row = next(args[0] for args in screen.strings if args[2] == "model")
+
+        self.assertLess(history_row, input_row)
+        self.assertLess(input_row, panel_row)
+        self.assertLess(panel_row, status_row)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,7 +36,7 @@ def create_glob_tool(working_directory: Path | None = None) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
     return create_tool(
         "Glob",
-        "Find files by glob pattern, including recursive ** patterns. Returns up to 200 newest files first.",
+        "Use Glob to find file paths by name or project structure before ReadFile, Grep, or EditFile. Provide a relative glob pattern such as **/*.py and an absolute search root, or null for the working directory; relative roots are accepted only for compatibility. Supports recursive **, excludes noisy directories, and returns up to 200 newest files first.",
         GLOB_PARAMS,
         lambda pattern, path: _glob(base_directory, pattern, path),
         _validate_arguments,

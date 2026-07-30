@@ -49,7 +49,7 @@ def create_grep_tool(working_directory: Path | None = None) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
     return create_tool(
         "Grep",
-        "Search UTF-8 text files with a regular expression. Returns up to 100 matching lines.",
+        "Use Grep to search file contents with a regular expression when looking for definitions, references, or error text. Provide an absolute search root inside the working directory, or null for the working directory; relative roots are accepted only for compatibility. Use glob to filter relative file paths, context for nearby lines, then ReadFile before EditFile. Returns up to 100 matching lines.",
         GREP_PARAMS,
         lambda pattern, path, glob, context: _grep(
             base_directory, pattern, path, glob, context

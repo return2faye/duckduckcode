@@ -29,6 +29,9 @@ class GlobTest(unittest.TestCase):
         self.assertTrue(self.tool.is_read_only)
         self.assertFalse(self.tool.is_dangerous)
         self.assertTrue(self.tool.is_concurrency_safe)
+        self.assertIn("Use Glob", self.tool.description)
+        self.assertIn("absolute search root", self.tool.description)
+        self.assertIn("newest files first", self.tool.description)
         self.assertEqual(
             self.tool.params,
             {

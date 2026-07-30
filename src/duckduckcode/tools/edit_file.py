@@ -33,7 +33,7 @@ def create_edit_file_tool(working_directory: Path | None = None) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
     return create_tool(
         "EditFile",
-        "Replace one uniquely matched string in an existing UTF-8 text file and return numbered context.",
+        "Use EditFile for targeted edits to an existing UTF-8 text file after using ReadFile first. Pass an absolute file path; relative paths are accepted only for compatibility. Provide old_string with enough exact context to match once, then new_string; the tool returns numbered context near the change.",
         EDIT_FILE_PARAMS,
         lambda path, old_string, new_string: _edit_file(
             base_directory, path, old_string, new_string

@@ -29,7 +29,7 @@ def create_write_file_tool(working_directory: Path | None = None) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
     return create_tool(
         "WriteFile",
-        "Create or completely replace a UTF-8 text file, including missing parent directories.",
+        "Use WriteFile only to create a new UTF-8 text file or replace a whole file when that is intended. Pass an absolute file path; relative paths are accepted only for compatibility. Prefer EditFile for targeted changes to existing files, and ReadFile first when replacing existing content.",
         WRITE_FILE_PARAMS,
         lambda path, content: _write_file(base_directory, path, content),
         _validate_arguments,

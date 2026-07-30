@@ -30,6 +30,10 @@ class EditFileTest(unittest.TestCase):
         self.assertFalse(self.tool.is_read_only)
         self.assertFalse(self.tool.is_dangerous)
         self.assertFalse(self.tool.is_concurrency_safe)
+        self.assertIn("Use EditFile", self.tool.description)
+        self.assertIn("ReadFile first", self.tool.description)
+        self.assertIn("absolute file path", self.tool.description)
+        self.assertIn("old_string", self.tool.description)
         self.assertEqual(
             self.tool.params,
             {

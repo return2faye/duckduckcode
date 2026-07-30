@@ -28,6 +28,10 @@ class GrepTest(unittest.TestCase):
         self.assertTrue(self.tool.is_read_only)
         self.assertFalse(self.tool.is_dangerous)
         self.assertTrue(self.tool.is_concurrency_safe)
+        self.assertIn("Use Grep", self.tool.description)
+        self.assertIn("absolute search root", self.tool.description)
+        self.assertIn("glob", self.tool.description)
+        self.assertIn("100 matching lines", self.tool.description)
         self.assertEqual(
             self.tool.params,
             {

@@ -30,6 +30,9 @@ class WriteFileTest(unittest.TestCase):
         self.assertFalse(self.tool.is_read_only)
         self.assertFalse(self.tool.is_dangerous)
         self.assertFalse(self.tool.is_concurrency_safe)
+        self.assertIn("Use WriteFile", self.tool.description)
+        self.assertIn("absolute file path", self.tool.description)
+        self.assertIn("whole file", self.tool.description)
         self.assertEqual(
             self.tool.params,
             {

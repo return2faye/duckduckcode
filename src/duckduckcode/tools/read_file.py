@@ -41,7 +41,7 @@ def create_read_file_tool(working_directory: Path | None = None) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
     return create_tool(
         "ReadFile",
-        "Read a UTF-8 text file with line numbers. Use offset and limit to read large files in chunks.",
+        "Use ReadFile to inspect an existing UTF-8 text file before proposing edits or before EditFile. Pass an absolute file path; relative paths are accepted only for compatibility. Use offset and limit to read large files in chunks. Prefer Glob to find file paths and Grep to search contents.",
         READ_FILE_PARAMS,
         lambda path, offset, limit: _read_file(base_directory, path, offset, limit),
         _validate_arguments,

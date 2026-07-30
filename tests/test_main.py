@@ -16,7 +16,7 @@ class MainTest(unittest.TestCase):
 
         self.assertEqual(
             [schema["name"] for schema in agent.tools.schemas()],
-            ["ReadFile", "WriteFile"],
+            ["ReadFile", "WriteFile", "EditFile"],
         )
 
     def test_repl_streams_agent_responses_for_multiple_turns(self) -> None:

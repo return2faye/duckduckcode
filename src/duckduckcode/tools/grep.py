@@ -45,14 +45,20 @@ GREP_PARAMS = {
 }
 
 
-def create_grep_tool(working_directory: Path | None = None) -> Tool:
+def create_grep_tool(
+    working_directory: Path | None = None,
+    allowed_directories: tuple[Path, ...] | None = None,
+) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
+    allowed = tuple(
+        path.resolve() for path in (allowed_directories or (base_directory,))
+    )
     return create_tool(
         "Grep",
-        "Use Grep to search file contents with a regular expression when looking for definitions, references, or error text. Provide an absolute search root inside the working directory, or null for the working directory; relative roots are accepted only for compatibility. Use glob to filter relative file paths, context for nearby lines, then ReadFile before EditFile. Returns up to 100 matching lines.",
+        "Use Grep to search file contents with a regular expression when looking for definitions, references, or error text. Provide an absolute search root inside an allowed directory, or null for the working directory; relative roots are accepted only for compatibility. Use glob to filter relative file paths, context for nearby lines, then ReadFile before EditFile. Returns up to 100 matching lines.",
         GREP_PARAMS,
         lambda pattern, path, glob, context: _grep(
-            base_directory, pattern, path, glob, context
+            base_directory, allowed, pattern, path, glob, context
         ),
         _validate_arguments,
         is_read_only=True,
@@ -134,6 +140,7 @@ def _validate_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _grep(
     working_directory: Path,
+    allowed_directories: tuple[Path, ...],
     pattern: re.Pattern[str],
     path: str | None,
     file_glob: str | None,
@@ -143,14 +150,16 @@ def _grep(
     unresolved = candidate if candidate.is_absolute() else working_directory / candidate
     root = unresolved.resolve()
 
-    try:
-        relative_root = root.relative_to(working_directory)
-    except ValueError:
+    allowed_root = next(
+        (allowed for allowed in allowed_directories if root.is_relative_to(allowed)),
+        None,
+    )
+    if allowed_root is None:
         return ToolResult(
-            f"Grep failed: search root '{root}' must be inside the working directory "
-            f"'{working_directory}'.",
+            f"Grep failed: search root '{root}' must be inside an allowed directory.",
             is_error=True,
         )
+    relative_root = root.relative_to(allowed_root)
     if not root.exists():
         return ToolResult(
             f"Grep failed: search root '{unresolved}' does not exist. "
@@ -183,7 +192,12 @@ def _grep(
             ):
                 continue
             try:
-                file_path.resolve().relative_to(working_directory)
+                resolved_file = file_path.resolve()
+                if not any(
+                    resolved_file.is_relative_to(allowed)
+                    for allowed in allowed_directories
+                ):
+                    continue
                 with file_path.open("rb") as binary_stream:
                     if b"\x00" in binary_stream.read(512):
                         continue
@@ -215,7 +229,10 @@ def _grep(
                     truncated = True
                     break
 
-            display_path = file_path.relative_to(working_directory).as_posix()
+            try:
+                display_path = file_path.relative_to(working_directory).as_posix()
+            except ValueError:
+                display_path = file_path.as_posix()
             for start, end in intervals:
                 output.extend(
                     f"{display_path}{':' if line_number in matching_lines else '-'}"

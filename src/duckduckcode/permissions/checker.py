@@ -17,3 +17,21 @@ class PermissionChecker:
             if denial is not None:
                 return denial
         return None
+
+    def start_task(self) -> None:
+        for rule in self._rules:
+            start_task = getattr(rule, "start_task", None)
+            if callable(start_task):
+                start_task()
+
+    def finish_task(self) -> None:
+        for rule in reversed(self._rules):
+            finish_task = getattr(rule, "finish_task", None)
+            if callable(finish_task):
+                finish_task()
+
+    def close(self) -> None:
+        for rule in reversed(self._rules):
+            close = getattr(rule, "close", None)
+            if callable(close):
+                close()

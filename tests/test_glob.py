@@ -108,6 +108,18 @@ class GlobTest(unittest.TestCase):
             ToolResult("(no matches)"),
         )
 
+    def test_skips_symbolic_links_that_resolve_outside_allowed_directories(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "secret.py"
+            external.write_text("secret", encoding="utf-8")
+            (self.root / "linked.py").symlink_to(external)
+
+            result = self.execute(pattern="*.py", path=None)
+
+        self.assertEqual(result, ToolResult("(no matches)"))
+
     def test_rejects_invalid_arguments_and_search_roots(self) -> None:
         file_path = self.root / "file.txt"
         file_path.write_text("", encoding="utf-8")

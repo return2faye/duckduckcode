@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+import stat
+import tempfile
 from typing import cast
 
 from duckduckcode.core.agent import Agent
@@ -15,7 +18,11 @@ from duckduckcode.core.event import (
     TurnCompleteEvent,
     UsageEvent,
 )
-from duckduckcode.permissions import PermissionChecker, check_bash_blacklist
+from duckduckcode.permissions import (
+    PathSandbox,
+    PermissionChecker,
+    check_bash_blacklist,
+)
 from duckduckcode.tools.tool import ToolCall, ToolManager
 
 
@@ -102,6 +109,125 @@ class PermissionCheckerTest(unittest.TestCase):
         for call in calls:
             with self.subTest(call=call):
                 self.assertIsNone(self.checker.check(call))
+
+
+class PathSandboxTest(unittest.TestCase):
+    def test_allows_workspace_and_private_temporary_directory(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            tempfile.TemporaryDirectory() as temporary_parent,
+        ):
+            sandbox = PathSandbox(
+                Path(workspace), temporary_parent=Path(temporary_parent)
+            )
+            self.addCleanup(sandbox.close)
+
+            self.assertIsNone(
+                sandbox(
+                    ToolCall(
+                        "workspace",
+                        "WriteFile",
+                        {"path": str(Path(workspace) / "src" / "new.py")},
+                    )
+                )
+            )
+            self.assertIsNone(
+                sandbox(
+                    ToolCall(
+                        "temporary",
+                        "WriteFile",
+                        {"path": str(sandbox.temporary_directory / "cache" / "data")},
+                    )
+                )
+            )
+            self.assertEqual(
+                stat.S_IMODE(sandbox.temporary_directory.stat().st_mode), 0o700
+            )
+
+    def test_rejects_paths_outside_allowed_directories(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as parent,
+            tempfile.TemporaryDirectory() as temporary_parent,
+        ):
+            workspace = Path(parent) / "project"
+            workspace.mkdir()
+            sandbox = PathSandbox(workspace, temporary_parent=Path(temporary_parent))
+            self.addCleanup(sandbox.close)
+
+            denial = sandbox(
+                ToolCall(
+                    "outside",
+                    "ReadFile",
+                    {"path": str(Path(parent) / "project-backup" / "secret.txt")},
+                )
+            )
+
+            self.assertIsNotNone(denial)
+            assert denial is not None
+            self.assertIn("outside the allowed directories", denial)
+
+    def test_resolves_symbolic_links_before_checking_allowed_directories(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            tempfile.TemporaryDirectory() as outside,
+            tempfile.TemporaryDirectory() as temporary_parent,
+        ):
+            link = Path(workspace) / "linked"
+            link.symlink_to(outside, target_is_directory=True)
+            sandbox = PathSandbox(
+                Path(workspace), temporary_parent=Path(temporary_parent)
+            )
+            self.addCleanup(sandbox.close)
+
+            denial = sandbox(
+                ToolCall(
+                    "symlink",
+                    "WriteFile",
+                    {"path": str(link / "escaped.txt")},
+                )
+            )
+
+            self.assertIsNotNone(denial)
+            assert denial is not None
+            self.assertIn("outside the allowed directories", denial)
+
+    def test_agent_cleans_private_temporary_directory_after_each_task(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            tempfile.TemporaryDirectory() as temporary_parent,
+        ):
+            sandbox = PathSandbox(
+                Path(workspace), temporary_parent=Path(temporary_parent)
+            )
+            nested = sandbox.temporary_directory / "cache" / "nested.txt"
+            nested.parent.mkdir()
+            nested.write_text("temporary", encoding="utf-8")
+            checker = PermissionChecker([sandbox])
+            task_directories = []
+
+            class FakeClient:
+                def stream(self, messages, tools=None, reasoning=None):
+                    task_directories.append(
+                        (
+                            sandbox.temporary_directory.is_dir(),
+                            stat.S_IMODE(sandbox.temporary_directory.stat().st_mode),
+                        )
+                    )
+                    yield DoneEvent()
+
+            agent = Agent(
+                cast(Client, FakeClient()),
+                permission_checker=checker,
+            )
+            list(agent.stream("finish this task"))
+
+            self.assertFalse(sandbox.temporary_directory.exists())
+
+            list(agent.stream("start another task"))
+
+            self.assertFalse(sandbox.temporary_directory.exists())
+            self.assertEqual(task_directories, [(True, 0o700), (True, 0o700)])
+            agent.close()
 
 
 class AgentPermissionTest(unittest.TestCase):

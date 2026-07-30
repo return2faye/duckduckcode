@@ -12,7 +12,7 @@ from .core.event import ConversationEvent, ErrorEvent
 from .core.prompts import build_system_prompt
 from .interfaces.backend import run_backend
 from .interfaces.tui import run_tui
-from .permissions import PermissionChecker, check_bash_blacklist
+from .permissions import PathSandbox, PermissionChecker, check_bash_blacklist
 from .providers.openai.client import OpenAIClient
 from .tools import (
     create_bash_tool,
@@ -72,6 +72,7 @@ def main() -> None:
     parser.add_argument("prompt", nargs="*", help="Optional first prompt.")
     args = parser.parse_args()
 
+    agent: Agent | None = None
     try:
         workspace = Path.cwd().resolve()
         config = Config.from_env()
@@ -92,24 +93,32 @@ def main() -> None:
             return
     except RuntimeError as exc:
         parser.exit(1, f"duckduckcode: error: {exc}\n")
+    finally:
+        if agent is not None:
+            agent.close()
 
 
 def build_agent(config: Config, workspace: Path) -> Agent:
+    path_sandbox = PathSandbox(workspace)
     tools = ToolManager()
     tools.register(create_read_file_tool(workspace))
     tools.register(create_write_file_tool(workspace))
     tools.register(create_edit_file_tool(workspace))
-    tools.register(create_glob_tool(workspace))
-    tools.register(create_grep_tool(workspace))
+    tools.register(create_glob_tool(workspace, path_sandbox.allowed_directories))
+    tools.register(create_grep_tool(workspace, path_sandbox.allowed_directories))
     tools.register(create_bash_tool(workspace))
     return Agent(
         OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
         ContextManager(
-            system_prompt=build_system_prompt(workspace, model=config.openai_model),
+            system_prompt=build_system_prompt(
+                workspace,
+                model=config.openai_model,
+                temporary_directory=path_sandbox.temporary_directory,
+            ),
             reasoning=config.reasoning,
         ),
         tools,
-        permission_checker=PermissionChecker([check_bash_blacklist]),
+        permission_checker=PermissionChecker([check_bash_blacklist, path_sandbox]),
     )
 
 

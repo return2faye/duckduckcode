@@ -23,6 +23,7 @@ EXPECTED_MODULES = {
     "permissions/__init__.py",
     "permissions/bash_blacklist.py",
     "permissions/checker.py",
+    "permissions/path_sandbox.py",
     "providers/__init__.py",
     "providers/openai/__init__.py",
     "providers/openai/client.py",

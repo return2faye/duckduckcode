@@ -171,7 +171,7 @@ class GrepTest(unittest.TestCase):
             cases = [
                 ("missing", "does not exist"),
                 ("file.txt", "is not a directory"),
-                (outside, "must be inside the working directory"),
+                (outside, "must be inside an allowed directory"),
             ]
 
             for path, message in cases:

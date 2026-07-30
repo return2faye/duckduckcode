@@ -32,13 +32,19 @@ GLOB_PARAMS = {
 }
 
 
-def create_glob_tool(working_directory: Path | None = None) -> Tool:
+def create_glob_tool(
+    working_directory: Path | None = None,
+    allowed_directories: tuple[Path, ...] | None = None,
+) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
+    allowed = tuple(
+        path.resolve() for path in (allowed_directories or (base_directory,))
+    )
     return create_tool(
         "Glob",
-        "Use Glob to find file paths by name or project structure before ReadFile, Grep, or EditFile. Provide a relative glob pattern such as **/*.py and an absolute search root, or null for the working directory; relative roots are accepted only for compatibility. Supports recursive **, excludes noisy directories, and returns up to 200 newest files first.",
+        "Use Glob to find file paths by name or project structure before ReadFile, Grep, or EditFile. Provide a relative glob pattern such as **/*.py and an absolute search root inside an allowed directory, or null for the working directory; relative roots are accepted only for compatibility. Supports recursive **, excludes noisy directories, and returns up to 200 newest files first.",
         GLOB_PARAMS,
-        lambda pattern, path: _glob(base_directory, pattern, path),
+        lambda pattern, path: _glob(base_directory, allowed, pattern, path),
         _validate_arguments,
         is_read_only=True,
         is_concurrency_safe=True,
@@ -89,12 +95,22 @@ def _validate_arguments(arguments: dict[str, Any]) -> dict[str, str | None]:
     return {"pattern": pattern, "path": path}
 
 
-def _glob(working_directory: Path, pattern: str, path: str | None) -> ToolResult:
+def _glob(
+    working_directory: Path,
+    allowed_directories: tuple[Path, ...],
+    pattern: str,
+    path: str | None,
+) -> ToolResult:
     candidate = Path(path) if path is not None else working_directory
     unresolved = candidate if candidate.is_absolute() else working_directory / candidate
 
     try:
         root = unresolved.resolve()
+        if not any(root.is_relative_to(allowed) for allowed in allowed_directories):
+            return ToolResult(
+                f"Glob failed: search root '{root}' must be inside an allowed directory.",
+                is_error=True,
+            )
         if not root.exists():
             return ToolResult(
                 f"Glob failed: search root '{unresolved}' does not exist. "
@@ -119,7 +135,9 @@ def _glob(working_directory: Path, pattern: str, path: str | None) -> ToolResult
             if EXCLUDED_DIRECTORIES.intersection(relative.parts):
                 continue
             result = (root / relative).resolve()
-            if result.is_file():
+            if result.is_file() and any(
+                result.is_relative_to(allowed) for allowed in allowed_directories
+            ):
                 matches[result] = result.stat().st_mtime_ns
     except PermissionError:
         return ToolResult(

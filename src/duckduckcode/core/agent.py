@@ -41,6 +41,13 @@ class Agent:
         self.permission_checker = permission_checker or PermissionChecker()
 
     def stream(self, user_message: str) -> Iterator[AgentEvent]:
+        self.permission_checker.start_task()
+        try:
+            yield from self._stream(user_message)
+        finally:
+            self.permission_checker.finish_task()
+
+    def _stream(self, user_message: str) -> Iterator[AgentEvent]:
         self.context.add_user(user_message)
         self.context.set_tool_schemas(self.tools.schemas())
 
@@ -133,3 +140,6 @@ class Agent:
             allowed.clear()
             yield tool_call, ToolResult(denial, is_error=True)
         yield from self.tools.execute_many(allowed)
+
+    def close(self) -> None:
+        self.permission_checker.close()

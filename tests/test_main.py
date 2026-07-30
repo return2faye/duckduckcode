@@ -22,6 +22,7 @@ class MainTest(unittest.TestCase):
     def test_build_agent_registers_core_file_tools(self) -> None:
         with patch("duckduckcode.main.OpenAIClient", return_value=object()):
             agent = build_agent(Config("test-key"), Path.cwd())
+        self.addCleanup(agent.close)
 
         self.assertEqual(
             [schema["name"] for schema in agent.tools.schemas()],
@@ -33,11 +34,30 @@ class MainTest(unittest.TestCase):
             workspace = Path(directory)
             with patch("duckduckcode.main.OpenAIClient", return_value=object()):
                 agent = build_agent(Config("test-key"), workspace)
+            self.addCleanup(agent.close)
 
-        self.assertIn(
-            f"Working directory: {workspace.resolve()}", agent.context.system_prompt
-        )
-        self.assertIn("Model: o4-mini", agent.context.system_prompt)
+            temporary_line = next(
+                line
+                for line in agent.context.system_prompt.splitlines()
+                if line.startswith("- Temporary directory: ")
+            )
+            temporary_directory = Path(
+                temporary_line.removeprefix("- Temporary directory: ")
+            )
+
+            self.assertIn(
+                f"Working directory: {workspace.resolve()}", agent.context.system_prompt
+            )
+            self.assertIn("Model: o4-mini", agent.context.system_prompt)
+            self.assertTrue(temporary_directory.is_dir())
+            self.assertEqual(
+                temporary_directory.stat().st_mode & 0o777,
+                0o700,
+            )
+
+            agent.close()
+
+            self.assertFalse(temporary_directory.exists())
 
     def test_build_agent_injects_one_workspace_into_all_file_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -46,6 +66,7 @@ class MainTest(unittest.TestCase):
             source.write_text("old", encoding="utf-8")
             with patch("duckduckcode.main.OpenAIClient", return_value=object()):
                 agent = build_agent(Config("test-key"), workspace)
+            self.addCleanup(agent.close)
 
             read = agent.tools.execute(
                 ToolCall(
@@ -104,6 +125,48 @@ class MainTest(unittest.TestCase):
                 {"output": f"{workspace.resolve()}\n", "exit_code": 0},
             )
 
+    def test_build_agent_allows_searching_private_temporary_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+                agent = build_agent(Config("test-key"), workspace)
+            self.addCleanup(agent.close)
+            temporary_line = next(
+                line
+                for line in agent.context.system_prompt.splitlines()
+                if line.startswith("- Temporary directory: ")
+            )
+            temporary_directory = Path(
+                temporary_line.removeprefix("- Temporary directory: ")
+            )
+            source = temporary_directory / "cache" / "result.txt"
+            source.parent.mkdir()
+            source.write_text("temporary result\n", encoding="utf-8")
+
+            glob_call = ToolCall(
+                "glob",
+                "Glob",
+                {"pattern": "*.txt", "path": str(source.parent)},
+            )
+            grep_call = ToolCall(
+                "grep",
+                "Grep",
+                {
+                    "pattern": "temporary",
+                    "path": str(source.parent),
+                    "glob": "*.txt",
+                    "context": 0,
+                },
+            )
+
+            self.assertIsNone(agent.permission_checker.check(glob_call))
+            self.assertIsNone(agent.permission_checker.check(grep_call))
+            self.assertEqual(agent.tools.execute(glob_call).content, str(source))
+            self.assertEqual(
+                agent.tools.execute(grep_call).content,
+                f"{source}:1:temporary result",
+            )
+
     def test_build_agent_rejects_blacklisted_bash_commands(self) -> None:
         call = ToolCall("call_1", "Bash", {"command": "rm -rf build"})
 
@@ -124,9 +187,9 @@ class MainTest(unittest.TestCase):
             marker.parent.mkdir()
             marker.write_text("keep", encoding="utf-8")
             with patch("duckduckcode.main.OpenAIClient", return_value=FakeClient()):
-                events = list(
-                    build_agent(Config("test-key"), workspace).stream("remove build")
-                )
+                agent = build_agent(Config("test-key"), workspace)
+                events = list(agent.stream("remove build"))
+                agent.close()
 
             self.assertTrue(marker.exists())
             self.assertIn(

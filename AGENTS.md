@@ -20,3 +20,8 @@ Build this project as a minimal Python coding agent.
 - Apply the ponytail skill for development: prefer stdlib/native features, reuse existing code, avoid speculative abstractions, and add dependencies only when they are clearly needed.
 - Put local secrets in `.env`; keep `.env.example` safe to commit.
 - Run `uv run duckduckcode "hello"` for a real API smoke test when `OPENAI_API_KEY` is configured.
+
+
+## Requirements
+- You Cannot make a commit without user's permission
+- Don't use complex procedure(like worktrees)

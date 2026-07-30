@@ -293,6 +293,21 @@ class TuiTest(unittest.TestCase):
         self.assertEqual(tui.selection_anchor, 1)
         self.assertEqual(tui.cursor_index, 4)
 
+    def test_mouse_drag_copies_selected_conversation_text(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        tui._chat_rows = ["hello", "world"]
+        tui._chat_geometry = {
+            6: (0, "hello"),
+            7: (1, "world"),
+        }
+
+        with patch("duckduckcode.interfaces.tui._write_clipboard") as copy:
+            tui._handle_mouse_event(0, 4, 6, False)
+            tui._handle_mouse_event(32, 5, 7, False)
+            tui._handle_mouse_event(0, 5, 7, True)
+
+        copy.assert_called_once_with("llo\nwor")
+
     def test_send_returns_while_backend_is_generating(self) -> None:
         release = threading.Event()
 
@@ -761,7 +776,10 @@ class TuiTest(unittest.TestCase):
         )
 
         tui._chat_tool_rows = {8: "call_1"}
+        tui._chat_rows = ["✓ Grep completed · 100 matches · [查看详情]"]
+        tui._chat_geometry = {8: (0, "✓ Grep completed · 100 matches · [查看详情]")}
         tui._handle_mouse_event(0, 4, 8, False)
+        tui._handle_mouse_event(0, 4, 8, True)
 
         self.assertEqual(tui.tool_results["call_1"].content, content)
         self.assertIn(content, tui._display_messages()[0][1])

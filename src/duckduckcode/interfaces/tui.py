@@ -143,6 +143,12 @@ class _Tui:
         self._input_width = 1
         self._input_geometry: list[tuple[int, int, int, str]] = []
         self._input_dragging = False
+        self._chat_rows: list[str] = []
+        self._chat_geometry: dict[int, tuple[int, str]] = {}
+        self._chat_selection_anchor: tuple[int, int] | None = None
+        self._chat_selection_cursor: tuple[int, int] | None = None
+        self._chat_dragging = False
+        self._chat_pressed_tool: str | None = None
         self.tool_results: dict[str, ToolResultEvent] = {}
         self._expanded_tool_results: set[str] = set()
         self._chat_tool_rows: dict[int, str] = {}
@@ -529,9 +535,13 @@ class _Tui:
 
     def _copy_selection(self) -> bool:
         selection = self._selection()
-        if selection is None:
-            return False
-        self._clipboard = self.input[slice(*selection)]
+        if selection is not None:
+            self._clipboard = self.input[slice(*selection)]
+        else:
+            chat_selection = self._chat_selection_text()
+            if chat_selection is None:
+                return False
+            self._clipboard = chat_selection
         _write_clipboard(self._clipboard)
         return True
 
@@ -572,6 +582,43 @@ class _Tui:
             if y > self._input_geometry[-1][0]:
                 return self._input_geometry[-1][2]
         return None
+
+    def _chat_position_at(
+        self, x: int, y: int, clamp: bool = False
+    ) -> tuple[int, int] | None:
+        geometry = self._chat_geometry.get(y)
+        if geometry is None and clamp and self._chat_geometry:
+            row = (
+                min(self._chat_geometry)
+                if y < min(self._chat_geometry)
+                else max(self._chat_geometry)
+            )
+            geometry = self._chat_geometry[row]
+        if geometry is None:
+            return None
+        row, text = geometry
+        return row, _index_at_column(0, len(text), text, max(0, x - 2))
+
+    def _chat_selection(
+        self,
+    ) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        if (
+            self._chat_selection_anchor is None
+            or self._chat_selection_cursor is None
+            or self._chat_selection_anchor == self._chat_selection_cursor
+        ):
+            return None
+        return tuple(sorted((self._chat_selection_anchor, self._chat_selection_cursor)))
+
+    def _chat_selection_text(self) -> str | None:
+        selection = self._chat_selection()
+        if selection is None:
+            return None
+        (start_row, start), (end_row, end) = selection
+        selected = self._chat_rows[start_row : end_row + 1]
+        selected[0] = selected[0][start:]
+        selected[-1] = selected[-1][:end]
+        return "\n".join(selected)
 
     def _draw(self) -> None:
         self.screen.erase()
@@ -642,15 +689,21 @@ class _Tui:
 
         chat_width = max(1, width - 1)
         rows = _message_rows(self._display_messages(), chat_width)
+        self._chat_rows = [text for _, text, _ in rows]
         viewport_height = max(0, input_y - header_height)
         self.scroll_offset = min(
             self.scroll_offset, max(0, len(rows) - viewport_height)
         )
         visible_rows = _visible_rows(rows, viewport_height, self.scroll_offset)
+        visible_start = max(0, len(rows) - self.scroll_offset - len(visible_rows))
         self._chat_tool_rows = {}
-        for row, (role, text, source_role) in enumerate(
-            visible_rows, start=header_height
+        self._chat_geometry = {}
+        chat_selection = self._chat_selection()
+        for row_index, (role, text, source_role) in enumerate(
+            visible_rows, start=visible_start
         ):
+            row = header_height + row_index - visible_start
+            self._chat_geometry[row] = (row_index, text)
             if source_role.startswith("tool:"):
                 self._chat_tool_rows[row] = source_role.removeprefix("tool:")
             if role:
@@ -669,6 +722,17 @@ class _Tui:
                 _clip(text, max(1, chat_width - 2)),
                 _color(text_color),
             )
+            if chat_selection is not None:
+                (start_row, start), (end_row, end) = chat_selection
+                selected_start = start if row_index == start_row else 0
+                selected_end = end if row_index == end_row else len(text)
+                if start_row <= row_index <= end_row and selected_start < selected_end:
+                    self.screen.addstr(
+                        row,
+                        2 + _text_width(text[:selected_start]),
+                        text[selected_start:selected_end],
+                        _color(text_color) | curses.A_REVERSE,
+                    )
 
         thumb_start, thumb_height, max_offset = _scrollbar(
             len(rows), viewport_height, self.scroll_offset
@@ -905,8 +969,25 @@ class _Tui:
                 index = self._input_index_at(x, y, clamp=True)
                 if index is not None:
                     self.cursor_index = index
+            elif self._chat_dragging:
+                position = self._chat_position_at(x, y, clamp=True)
+                if position is not None:
+                    self._chat_selection_cursor = position
+                if self._chat_selection() is None:
+                    call_id = self._chat_tool_rows.get(y)
+                    if call_id is not None and call_id == self._chat_pressed_tool:
+                        if call_id in self._expanded_tool_results:
+                            self._expanded_tool_results.remove(call_id)
+                        else:
+                            self._expanded_tool_results.add(call_id)
+                    self._chat_selection_anchor = None
+                    self._chat_selection_cursor = None
+                else:
+                    self._copy_selection()
             self._scroll_drag_offset = None
             self._input_dragging = False
+            self._chat_dragging = False
+            self._chat_pressed_tool = None
             if self.selection_anchor == self.cursor_index:
                 self.selection_anchor = None
             return
@@ -916,20 +997,28 @@ class _Tui:
                 old_cursor = self.cursor_index
                 self.cursor_index = index
                 self.selection_anchor = old_cursor if shifted else self.cursor_index
+                self._chat_selection_anchor = None
+                self._chat_selection_cursor = None
                 self._input_dragging = True
                 return
-            call_id = self._chat_tool_rows.get(y)
             bar_x = self._scrollbar_geometry[0] if self._scrollbar_geometry else -1
-            if call_id is not None and x != bar_x:
-                if call_id in self._expanded_tool_results:
-                    self._expanded_tool_results.remove(call_id)
-                else:
-                    self._expanded_tool_results.add(call_id)
+            position = self._chat_position_at(x, y)
+            if position is not None and x != bar_x:
+                self.selection_anchor = None
+                self._chat_selection_anchor = position
+                self._chat_selection_cursor = position
+                self._chat_dragging = True
+                self._chat_pressed_tool = self._chat_tool_rows.get(y)
                 return
         if button == 32 and self._input_dragging:
             index = self._input_index_at(x, y, clamp=True)
             if index is not None:
                 self.cursor_index = index
+            return
+        if button == 32 and self._chat_dragging:
+            position = self._chat_position_at(x, y, clamp=True)
+            if position is not None:
+                self._chat_selection_cursor = position
             return
         if self._scrollbar_geometry is None:
             return

@@ -20,6 +20,7 @@ from duckduckcode.core.event import (
     TurnCompleteEvent,
     UsageEvent,
 )
+from duckduckcode.core.prompts import buildSystemPrompt, build_system_prompt
 from duckduckcode.providers.openai.client import OpenAIClient
 from duckduckcode.providers.openai.serialize import (
     OpenAIResponsesDeserializer,
@@ -235,6 +236,37 @@ class OpenAIClientTest(unittest.TestCase):
 
 
 class ContextManagerTest(unittest.TestCase):
+    def test_build_system_prompt_includes_identity_environment_and_mode_slot(
+        self,
+    ) -> None:
+        prompt = build_system_prompt(
+            workspace="/repo",
+            os_name="TestOS",
+            mode_instructions="Mode: test-only",
+            model="test-model",
+        )
+
+        self.assertIn("You are DuckDuckCode", prompt)
+        self.assertIn("Role constraints:", prompt)
+        self.assertIn("Behavior guidelines:", prompt)
+        self.assertIn("Tool use:", prompt)
+        self.assertIn("Bug fixes:", prompt)
+        self.assertIn("Security and safety:", prompt)
+        self.assertIn("Use absolute file paths when calling file tools.", prompt)
+        self.assertIn("OS: TestOS", prompt)
+        self.assertIn("Model: test-model", prompt)
+        self.assertIn("Working directory: /repo", prompt)
+        self.assertIn("Mode: test-only", prompt)
+        self.assertEqual(
+            buildSystemPrompt("/repo", "TestOS", "Mode: test-only", "test-model"),
+            prompt,
+        )
+
+    def test_context_builds_default_system_prompt_for_workspace(self) -> None:
+        context = ContextManager(workspace="/repo")
+
+        self.assertIn("Working directory: /repo", context.model_messages()[0].content)
+
     def test_model_messages_include_system_prompt_and_abstraction_first(self) -> None:
         context = ContextManager(system_prompt="system prompt", abstraction="summary")
         context.add_user("hello")

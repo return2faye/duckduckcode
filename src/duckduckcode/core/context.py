@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from ..tools.tool import ToolCall
-
-DEFAULT_SYSTEM_PROMPT = """You are DuckDuckCode, a pragmatic coding agent.
-Use the ponytail skill: prefer the smallest correct change, stdlib/native
-features before dependencies, and skip speculative abstractions."""
+from .prompts import build_system_prompt
 
 
 @dataclass(frozen=True)
@@ -60,13 +58,17 @@ class Message:
 class ContextManager:
     def __init__(
         self,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        system_prompt: str | None = None,
+        workspace: str | Path | None = None,
+        mode_instructions: str = "",
         abstraction: str = "",
         reasoning: ReasoningConfig | None = None,
         tool_schemas: list[dict[str, Any]] | None = None,
     ) -> None:
         self._messages: list[Message] = []
-        self.system_prompt = system_prompt
+        self.system_prompt = system_prompt or build_system_prompt(
+            workspace, mode_instructions=mode_instructions
+        )
         self.abstraction = abstraction
         self.reasoning = reasoning or ReasoningConfig()
         self._tool_schemas = tool_schemas or []

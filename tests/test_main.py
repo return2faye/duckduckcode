@@ -22,6 +22,17 @@ class MainTest(unittest.TestCase):
             ["ReadFile", "WriteFile", "EditFile", "Glob", "Grep"],
         )
 
+    def test_build_agent_injects_workspace_into_system_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+                agent = build_agent(Config("test-key"), workspace)
+
+        self.assertIn(
+            f"Working directory: {workspace.resolve()}", agent.context.system_prompt
+        )
+        self.assertIn("Model: o4-mini", agent.context.system_prompt)
+
     def test_build_agent_injects_one_workspace_into_all_file_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

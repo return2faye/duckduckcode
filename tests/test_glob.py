@@ -40,7 +40,7 @@ class GlobTest(unittest.TestCase):
                     },
                     "path": {
                         "type": ["string", "null"],
-                        "description": "Search root. Use null for the working directory.",
+                        "description": "Absolute search root. Use null for the working directory; relative paths are accepted only for compatibility.",
                     },
                 },
                 "required": ["pattern", "path"],

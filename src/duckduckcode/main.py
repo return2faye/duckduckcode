@@ -9,6 +9,7 @@ from .config import Config
 from .core.agent import Agent
 from .core.context import ContextManager
 from .core.event import ConversationEvent, ErrorEvent
+from .core.prompts import build_system_prompt
 from .interfaces.backend import run_backend
 from .interfaces.tui import run_tui
 from .providers.openai.client import OpenAIClient
@@ -100,7 +101,10 @@ def build_agent(config: Config, workspace: Path) -> Agent:
     tools.register(create_grep_tool(workspace))
     return Agent(
         OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
-        ContextManager(reasoning=config.reasoning),
+        ContextManager(
+            system_prompt=build_system_prompt(workspace, model=config.openai_model),
+            reasoning=config.reasoning,
+        ),
         tools,
     )
 

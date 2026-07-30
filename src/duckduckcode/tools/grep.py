@@ -28,7 +28,7 @@ GREP_PARAMS = {
         },
         "path": {
             "type": ["string", "null"],
-            "description": "Search root inside the working directory. Use null for the working directory.",
+            "description": "Absolute search root inside the working directory. Use null for the working directory; relative paths are accepted only for compatibility.",
         },
         "glob": {
             "type": ["string", "null"],

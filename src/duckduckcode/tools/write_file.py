@@ -13,7 +13,7 @@ WRITE_FILE_PARAMS = {
     "properties": {
         "path": {
             "type": "string",
-            "description": "Absolute path or path relative to the working directory.",
+            "description": "Absolute file path. Relative paths are accepted only for compatibility.",
         },
         "content": {
             "type": "string",

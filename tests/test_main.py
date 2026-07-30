@@ -221,7 +221,7 @@ class MainTest(unittest.TestCase):
             permissions = workspace / ".duckduckcode" / "permissions.yaml"
             permissions.parent.mkdir()
             permissions.write_text(
-                "ask:\n  - Bash(git push*)\n",
+                "Bash:\n" '  - content: "git push*"\n' "    action: ask\n",
                 encoding="utf-8",
             )
             with (

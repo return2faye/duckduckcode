@@ -5,7 +5,6 @@ from fnmatch import fnmatchcase
 import glob
 import os
 from pathlib import Path, PurePosixPath
-import re
 import tempfile
 from typing import Literal
 
@@ -16,10 +15,12 @@ from ..tools.tool import ToolCall
 
 PermissionAction = Literal["deny", "ask", "allow", "unspecified"]
 RuleAction = Literal["deny", "ask", "allow"]
-_ACTIONS: tuple[RuleAction, ...] = ("deny", "ask", "allow")
+_ACTION_BY_NAME: dict[str, RuleAction] = {
+    "deny": "deny",
+    "ask": "ask",
+    "allow": "allow",
+}
 _PATH_TOOLS = frozenset({"ReadFile", "WriteFile", "EditFile", "Glob", "Grep"})
-_RULE_PATTERN = re.compile(r"([A-Za-z][A-Za-z0-9_]*)\((.*)\)", re.DOTALL)
-_EMPTY_PERMISSIONS = "deny: []\nask: []\nallow: []\n"
 
 
 @dataclass(frozen=True)
@@ -43,14 +44,12 @@ class RulePolicy:
         self,
         workspace: Path,
         temporary_directory: Path,
-        known_tools: set[str],
         rules: list[_Rule],
         local_file: Path,
-        local_data: dict[str, list[str]],
+        local_data: dict[str, list[dict[str, str]]],
     ) -> None:
         self.workspace = workspace.resolve()
         self.temporary_directory = temporary_directory.resolve()
-        self.known_tools = known_tools
         self.rules = rules
         self.local_file = local_file
         self._local_data = local_data
@@ -80,30 +79,23 @@ class RulePolicy:
             (local_file, True),
         )
         for path, _local in sources:
-            _initialize_file(path)
+            _initialize_file(path, known_tools)
         rules: list[_Rule] = []
-        local_data: dict[str, list[str]] = {}
+        local_data: dict[str, list[dict[str, str]]] = {}
         for path, local in sources:
-            data = _load_file(path)
+            source_rules, data = _load_file(
+                path,
+                local,
+                workspace,
+                temporary_directory,
+                known_tools,
+            )
+            rules.extend(source_rules)
             if local:
                 local_data = data
-            for action in _ACTIONS:
-                for text in data.get(action, []):
-                    rules.append(
-                        _parse_rule(
-                            action,
-                            text,
-                            path,
-                            local,
-                            workspace,
-                            temporary_directory,
-                            known_tools,
-                        )
-                    )
         return cls(
             workspace,
             temporary_directory,
-            known_tools,
             rules,
             local_file,
             local_data,
@@ -159,12 +151,13 @@ class RulePolicy:
                 f"Cannot remember permission for malformed {tool_call.name} input."
             )
         pattern = self._stored_pattern(tool_call.name, content)
-        text = f"{tool_call.name}({pattern})"
         local_data = {
-            action: list(values) for action, values in self._local_data.items()
+            name: [dict(entry) for entry in entries]
+            for name, entries in self._local_data.items()
         }
-        allowed = local_data.setdefault("allow", [])
-        if text in allowed:
+        entry = {"content": pattern, "action": "allow"}
+        tool_rules = local_data.setdefault(tool_call.name, [])
+        if entry in tool_rules:
             return
         self.local_file.parent.mkdir(parents=True, exist_ok=True)
         permission_directory = self.local_file.parent.resolve()
@@ -172,7 +165,7 @@ class RulePolicy:
             raise RuntimeError(
                 f"Permission file '{self.local_file}' resolves outside the workspace."
             )
-        allowed.append(text)
+        tool_rules.append(entry)
         descriptor, temporary_path = tempfile.mkstemp(
             prefix=".permissions.", suffix=".yaml", dir=permission_directory
         )
@@ -193,14 +186,14 @@ class RulePolicy:
                 os.unlink(temporary_path)
         self._local_data = local_data
         self.rules.append(
-            _parse_rule(
+            _build_rule(
                 "allow",
-                text,
+                tool_call.name,
+                pattern,
                 self.local_file,
                 True,
                 self.workspace,
                 self.temporary_directory,
-                self.known_tools,
             )
         )
 
@@ -237,9 +230,15 @@ class RulePolicy:
         return glob.escape(path.as_posix())
 
 
-def _load_file(path: Path) -> dict[str, list[str]]:
+def _load_file(
+    path: Path,
+    local: bool,
+    workspace: Path,
+    temporary_directory: Path,
+    known_tools: set[str],
+) -> tuple[list[_Rule], dict[str, list[dict[str, str]]]]:
     if not path.exists():
-        return {}
+        return [], {}
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
@@ -247,29 +246,17 @@ def _load_file(path: Path) -> dict[str, list[str]]:
     except OSError as exc:
         raise RuntimeError(f"Could not read permission file '{path}': {exc}") from exc
     if loaded is None:
-        return {}
+        return [], {}
     if not isinstance(loaded, dict):
         raise RuntimeError(f"Permission file '{path}' must contain a YAML mapping.")
-    unknown = set(loaded) - set(_ACTIONS)
-    if unknown:
-        raise RuntimeError(
-            f"Permission file '{path}' has unknown field(s): "
-            + ", ".join(sorted(map(str, unknown)))
-        )
-    data: dict[str, list[str]] = {}
-    for action, values in loaded.items():
-        if not isinstance(action, str):
-            raise RuntimeError(f"Permission file '{path}' has a non-string field name.")
-        if not isinstance(values, list):
-            raise RuntimeError(
-                f"Permission file '{path}' field '{action}' must be a list."
-            )
-        if not all(isinstance(value, str) for value in values):
-            raise RuntimeError(
-                f"Permission file '{path}' field '{action}' must contain strings."
-            )
-        data[action] = list(dict.fromkeys(values))
-    return data
+    return _load_tool_rules(
+        loaded,
+        path,
+        local,
+        workspace,
+        temporary_directory,
+        known_tools,
+    )
 
 
 def _permission_directory(directory: Path, root: Path, name: str) -> Path:
@@ -287,13 +274,21 @@ def _permission_directory(directory: Path, root: Path, name: str) -> Path:
     return resolved
 
 
-def _initialize_file(path: Path) -> None:
+def _initialize_file(path: Path, known_tools: set[str]) -> None:
+    if path.exists():
+        return
+
     descriptor, temporary_path = tempfile.mkstemp(
         prefix=".permissions.", suffix=".yaml", dir=path.parent
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(_EMPTY_PERMISSIONS)
+            yaml.safe_dump(
+                {tool_name: [] for tool_name in sorted(known_tools)},
+                stream,
+                allow_unicode=True,
+                sort_keys=False,
+            )
             stream.flush()
             os.fsync(stream.fileno())
         try:
@@ -309,23 +304,69 @@ def _initialize_file(path: Path) -> None:
             os.unlink(temporary_path)
 
 
-def _parse_rule(
-    action: RuleAction,
-    text: str,
+def _load_tool_rules(
+    loaded: dict[object, object],
     path: Path,
     local: bool,
     workspace: Path,
     temporary_directory: Path,
     known_tools: set[str],
+) -> tuple[list[_Rule], dict[str, list[dict[str, str]]]]:
+    rules: list[_Rule] = []
+    data = {tool_name: [] for tool_name in sorted(known_tools)}
+    for tool_name, entries in loaded.items():
+        if not isinstance(tool_name, str) or tool_name not in known_tools:
+            raise RuntimeError(
+                f"Permission file '{path}' references unknown tool '{tool_name}'."
+            )
+        if not isinstance(entries, list):
+            raise RuntimeError(
+                f"Permission file '{path}' field '{tool_name}' must be a list."
+            )
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != {"content", "action"}:
+                raise RuntimeError(
+                    f"Permission file '{path}' rules must contain exactly "
+                    "'content' and 'action'."
+                )
+            content = entry["content"]
+            action = entry["action"]
+            if not isinstance(content, str) or not content:
+                raise RuntimeError(
+                    f"Permission file '{path}' has a rule with invalid content."
+                )
+            if not isinstance(action, str) or action not in _ACTION_BY_NAME:
+                raise RuntimeError(
+                    f"Permission file '{path}' has invalid action '{action}'."
+                )
+            normalized = {"content": content, "action": action}
+            if normalized in data[tool_name]:
+                continue
+            data[tool_name].append(normalized)
+            rules.append(
+                _build_rule(
+                    _ACTION_BY_NAME[action],
+                    tool_name,
+                    content,
+                    path,
+                    local,
+                    workspace,
+                    temporary_directory,
+                )
+            )
+    return rules, data
+
+
+def _build_rule(
+    action: RuleAction,
+    tool_name: str,
+    pattern: str,
+    path: Path,
+    local: bool,
+    workspace: Path,
+    temporary_directory: Path,
 ) -> _Rule:
-    match = _RULE_PATTERN.fullmatch(text)
-    if match is None or not match.group(2):
-        raise RuntimeError(f"Permission file '{path}' has invalid rule '{text}'.")
-    tool_name, pattern = match.groups()
-    if tool_name not in known_tools:
-        raise RuntimeError(
-            f"Permission file '{path}' references unknown tool '{tool_name}'."
-        )
+    text = f"{tool_name}({pattern})"
     if tool_name in _PATH_TOOLS:
         if pattern.startswith("./"):
             pattern = (workspace / pattern[2:]).as_posix()

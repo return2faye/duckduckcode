@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import yaml
+
 from duckduckcode.permissions import RulePolicy
 from duckduckcode.tools.tool import ToolCall
 
@@ -20,7 +22,7 @@ class RulePolicyTest(unittest.TestCase):
         ):
             home = Path(home_directory)
             workspace = Path(workspace_directory)
-            expected = "deny: []\nask: []\nallow: []\n"
+            expected = {tool: [] for tool in sorted(TOOLS)}
 
             RulePolicy.load(
                 workspace,
@@ -35,11 +37,12 @@ class RulePolicyTest(unittest.TestCase):
                 workspace / ".duckduckcode" / "permissions.local.yaml",
             ]
             self.assertEqual(
-                [path.read_text(encoding="utf-8") for path in paths],
+                [yaml.safe_load(path.read_text(encoding="utf-8")) for path in paths],
                 [expected, expected, expected],
             )
 
-            paths[1].write_text("allow:\n  - Bash(git status)\n", encoding="utf-8")
+            existing = "Bash:\n" "  - content: git status\n" "    action: allow\n"
+            paths[1].write_text(existing, encoding="utf-8")
             RulePolicy.load(
                 workspace,
                 Path(temporary_directory),
@@ -49,7 +52,7 @@ class RulePolicyTest(unittest.TestCase):
 
             self.assertEqual(
                 paths[1].read_text(encoding="utf-8"),
-                "allow:\n  - Bash(git status)\n",
+                existing,
             )
 
     def test_defaults_unmatched_known_tools_to_ask(self) -> None:
@@ -87,29 +90,38 @@ class RulePolicyTest(unittest.TestCase):
             )
             (home / ".duckduckcode" / "permissions.yaml").write_text(
                 """
-deny:
-  - "Bash(git push --force*)"
-  - "ReadFile(**/.env)"
-allow:
-  - "Bash(git *)"
+Bash:
+  - content: "git push --force*"
+    action: deny
+  - content: "git *"
+    action: allow
+ReadFile:
+  - content: "**/.env"
+    action: deny
 """,
                 encoding="utf-8",
             )
             (workspace / ".duckduckcode" / "permissions.yaml").write_text(
                 """
-ask:
-  - "Bash(git push *)"
-  - "ReadFile(./src/*.py)"
-allow:
-  - "ReadFile(./src/**)"
-  - "WriteFile(${TEMP}/cache.json)"
+Bash:
+  - content: "git push *"
+    action: ask
+ReadFile:
+  - content: "./src/*.py"
+    action: ask
+  - content: "./src/**"
+    action: allow
+WriteFile:
+  - content: "${TEMP}/cache.json"
+    action: allow
 """,
                 encoding="utf-8",
             )
             (workspace / ".duckduckcode" / "permissions.local.yaml").write_text(
                 """
-allow:
-  - "Bash(git push origin main)"
+Bash:
+  - content: "git push origin main"
+    action: allow
 """,
                 encoding="utf-8",
             )
@@ -204,11 +216,11 @@ allow:
             workspace = Path(workspace_directory)
             (workspace / ".duckduckcode").mkdir()
             (workspace / ".duckduckcode" / "permissions.yaml").write_text(
-                'ask:\n  - "Bash(git push *)"\n',
+                "Bash:\n" '  - content: "git push *"\n' "    action: ask\n",
                 encoding="utf-8",
             )
             (workspace / ".duckduckcode" / "permissions.local.yaml").write_text(
-                'allow:\n  - "Bash(git push origin *)"\n',
+                "Bash:\n" '  - content: "git push origin *"\n' "    action: allow\n",
                 encoding="utf-8",
             )
 
@@ -233,10 +245,19 @@ allow:
     def test_fails_closed_for_invalid_permission_files(self) -> None:
         cases = [
             ("deny: [", "YAML"),
-            ("unknown:\n  - Bash(*)\n", "unknown field"),
-            ("allow: Bash(*)\n", "must be a list"),
-            ("allow:\n  - broken\n", "invalid rule"),
-            ("allow:\n  - Missing(*)\n", "unknown tool"),
+            ("unknown:\n  - Bash(*)\n", "unknown tool"),
+            ("allow: Bash(*)\n", "unknown tool"),
+            ("allow:\n  - Bash(git status)\n", "unknown tool"),
+            ("Missing: []\n", "unknown tool"),
+            ("Bash: nope\n", "must be a list"),
+            (
+                "Bash:\n  - content: git status\n    action: maybe\n",
+                "invalid action",
+            ),
+            (
+                "Bash:\n  - content: git status\n    status: allow\n",
+                "exactly 'content' and 'action'",
+            ),
         ]
         for content, message in cases:
             with self.subTest(content=content):
@@ -271,7 +292,7 @@ allow:
             permission_directory = workspace / ".duckduckcode"
             permission_directory.mkdir()
             (permission_directory / "permissions.yaml").write_text(
-                'ask:\n  - "Bash(git push *)"\n',
+                "Bash:\n" '  - content: "git push *"\n' "    action: ask\n",
                 encoding="utf-8",
             )
             policy = RulePolicy.load(workspace, private_temp, TOOLS, home=home)
@@ -297,14 +318,28 @@ allow:
                 policy.remember_allow(call)
                 policy.remember_allow(call)
 
-            content = (permission_directory / "permissions.local.yaml").read_text(
-                encoding="utf-8"
+            data = yaml.safe_load(
+                (permission_directory / "permissions.local.yaml").read_text(
+                    encoding="utf-8"
+                )
             )
-            self.assertEqual(content.count("Bash("), 1)
-            self.assertEqual(content.count("ReadFile("), 1)
-            self.assertEqual(content.count("WriteFile("), 1)
-            self.assertIn("./src/app.py", content)
-            self.assertIn("${TEMP}/cache.json", content)
+            self.assertEqual(
+                data["Bash"],
+                [
+                    {
+                        "content": "git push origin feature[[]x]",
+                        "action": "allow",
+                    }
+                ],
+            )
+            self.assertEqual(
+                data["ReadFile"],
+                [{"content": "./src/app.py", "action": "allow"}],
+            )
+            self.assertEqual(
+                data["WriteFile"],
+                [{"content": "${TEMP}/cache.json", "action": "allow"}],
+            )
 
             reloaded = RulePolicy.load(workspace, private_temp, TOOLS, home=home)
             for call in calls:
@@ -338,7 +373,32 @@ allow:
             policy.remember_allow(call)
 
             local_file = workspace / ".duckduckcode" / "permissions.local.yaml"
-            self.assertIn("Bash(git status)", local_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                yaml.safe_load(local_file.read_text(encoding="utf-8"))["Bash"],
+                [{"content": "git status", "action": "allow"}],
+            )
+
+    def test_rejects_legacy_action_first_rules(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as home_directory,
+            tempfile.TemporaryDirectory() as workspace_directory,
+            tempfile.TemporaryDirectory() as temporary_directory,
+        ):
+            workspace = Path(workspace_directory)
+            permission_directory = workspace / ".duckduckcode"
+            permission_directory.mkdir()
+            (permission_directory / "permissions.yaml").write_text(
+                "allow:\n  - Bash(git status)\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "unknown tool 'allow'"):
+                RulePolicy.load(
+                    workspace,
+                    Path(temporary_directory),
+                    TOOLS,
+                    home=Path(home_directory),
+                )
 
     def test_refuses_to_initialize_through_a_symlinked_permission_directory(
         self,

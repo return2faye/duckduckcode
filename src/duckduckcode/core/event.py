@@ -44,6 +44,17 @@ class ToolResultEvent:
     is_error: bool = False
 
 
+PermissionChoice = Literal["allow_once", "allow_always", "deny"]
+
+
+@dataclass(frozen=True)
+class PermissionRequestEvent:
+    call_id: str
+    name: str
+    content: str
+    message: str
+
+
 @dataclass(frozen=True)
 class TurnCompleteEvent:
     iteration: int
@@ -65,6 +76,7 @@ AgentEvent = (
     ConversationEvent
     | ToolCallEvent
     | ToolResultEvent
+    | PermissionRequestEvent
     | TurnCompleteEvent
     | LoopCompleteEvent
     | UsageEvent

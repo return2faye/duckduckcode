@@ -13,6 +13,7 @@ from duckduckcode.core.event import (
     ConversationEvent,
     ErrorEvent,
     LoopCompleteEvent,
+    PermissionRequestEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -126,6 +127,25 @@ class TuiTest(unittest.TestCase):
         )
         process.stdin.seek(0)
         self.assertEqual(json.loads(process.stdin.read()), {"message": "hello"})
+
+    def test_pipe_backend_writes_permission_response(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+
+        process = FakeProcess()
+
+        PipeBackend(process).respond_permission("call_1", "allow_always")
+
+        process.stdin.seek(0)
+        self.assertEqual(
+            json.loads(process.stdin.read()),
+            {
+                "type": "permission_response",
+                "call_id": "call_1",
+                "decision": "allow_always",
+            },
+        )
 
     def test_pipe_backend_cancels_current_process_stream(self) -> None:
         class FakeProcess:
@@ -315,6 +335,46 @@ class TuiTest(unittest.TestCase):
         )
         self.assertEqual(tui.tokens, 6)
         self.assertIsNone(tui._events)
+
+    def test_permission_dialog_uses_arrows_enter_and_escape(self) -> None:
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.responses = []
+
+            def respond_permission(self, call_id, decision):
+                self.responses.append((call_id, decision))
+
+        backend = FakeBackend()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.messages = [("tool:call_1", "→ Bash running…")]
+        tui._events = queue.Queue()
+        tui._events.put(
+            PermissionRequestEvent(
+                "call_1",
+                "Bash",
+                "git push origin main",
+                "approval required",
+            )
+        )
+        tui._consume_events()
+
+        self.assertEqual(tui._permission_selection, 2)
+        tui._handle_permission_key(curses.KEY_UP)
+        self.assertEqual(tui._permission_selection, 1)
+        tui._handle_permission_key("\n")
+        self.assertEqual(backend.responses, [("call_1", "allow_always")])
+        self.assertIsNone(tui._permission_request)
+
+        tui._permission_request = PermissionRequestEvent(
+            "call_2", "Bash", "git push origin next", "approval required"
+        )
+        tui._handle_permission_key("\x1b")
+
+        self.assertEqual(
+            backend.responses,
+            [("call_1", "allow_always"), ("call_2", "deny")],
+        )
+        self.assertIsNone(tui._permission_request)
 
     def test_long_tool_result_is_collapsed_but_preserved_and_expandable(self) -> None:
         tui = _Tui(object(), "model", "/tmp", object())

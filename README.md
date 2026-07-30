@@ -24,18 +24,6 @@ uv run duckduckcode
 
 DuckDuckCode starts the TUI by default. The upper area shows the duck banner, version, working directory, and chat history. The lower input area accepts prompts, and the bottom status bar shows the model and token usage. Press `Esc` to interrupt a response, or press it while idle to exit.
 
-The old line REPL is still available:
-
-```bash
-uv run duckduckcode --repl
-```
-
-You can also pass one first prompt and exit after the response:
-
-```bash
-uv run duckduckcode "Say hello in one sentence."
-```
-
 ## Structure
 
 - `agent.py`: main multi-turn agent flow

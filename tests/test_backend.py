@@ -7,6 +7,7 @@ import unittest
 from duckduckcode.core.event import (
     ConversationEvent,
     LoopCompleteEvent,
+    PermissionRequestEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -17,6 +18,50 @@ from duckduckcode.tools.tool import ToolCall
 
 
 class BackendTest(unittest.TestCase):
+    def test_backend_round_trips_permission_responses(self) -> None:
+        choices = []
+
+        class FakeAgent:
+            def stream(self, message):
+                choice = yield PermissionRequestEvent(
+                    "call_1",
+                    "Bash",
+                    "git push origin main",
+                    "approval required",
+                )
+                choices.append(choice)
+                yield LoopCompleteEvent("completed", 1)
+
+        output = io.StringIO()
+        run_backend(
+            FakeAgent(),
+            input_stream=io.StringIO(
+                '{"message": "push"}\n'
+                '{"type": "permission_response", "call_id": "call_1", '
+                '"decision": "allow_once"}\n'
+            ),
+            output_stream=output,
+        )
+
+        self.assertEqual(choices, ["allow_once"])
+        self.assertEqual(
+            [json.loads(line) for line in output.getvalue().splitlines()],
+            [
+                {
+                    "type": "permission_request",
+                    "call_id": "call_1",
+                    "name": "Bash",
+                    "content": "git push origin main",
+                    "message": "approval required",
+                },
+                {
+                    "type": "loop_complete",
+                    "reason": "completed",
+                    "iterations": 1,
+                },
+            ],
+        )
+
     def test_backend_streams_json_lines_for_each_prompt(self) -> None:
         calls = []
 

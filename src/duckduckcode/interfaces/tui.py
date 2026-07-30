@@ -20,6 +20,8 @@ from ..core.event import (
     ConversationEvent,
     ErrorEvent,
     LoopCompleteEvent,
+    PermissionChoice,
+    PermissionRequestEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -41,6 +43,11 @@ TEXT_COLOR = 5
 WAIT_FRAMES = ["thinking .  ", "thinking .. ", "thinking ..."]
 SHORT_TOOL_RESULT_LINES = 10
 SHORT_TOOL_RESULT_CHARS = 1_000
+PERMISSION_OPTIONS: tuple[tuple[PermissionChoice, str], ...] = (
+    ("allow_once", "允许一次"),
+    ("allow_always", "始终允许"),
+    ("deny", "拒绝"),
+)
 
 
 class PipeBackend:
@@ -63,6 +70,19 @@ class PipeBackend:
             yield event
             if isinstance(event, LoopCompleteEvent):
                 break
+
+    def respond_permission(self, call_id: str, decision: PermissionChoice) -> None:
+        self.process.stdin.write(
+            json.dumps(
+                {
+                    "type": "permission_response",
+                    "call_id": call_id,
+                    "decision": decision,
+                }
+            )
+            + "\n"
+        )
+        self.process.stdin.flush()
 
     def close(self) -> None:
         if self.process.stdin:
@@ -109,6 +129,8 @@ class _Tui:
         self._waiting = False
         self._wait_frame = 0
         self._interrupting = False
+        self._permission_request: PermissionRequestEvent | None = None
+        self._permission_selection = len(PERMISSION_OPTIONS) - 1
 
     def run(self) -> None:
         curses.curs_set(1)
@@ -127,6 +149,12 @@ class _Tui:
                 try:
                     key = self.screen.get_wch()
                 except curses.error:
+                    continue
+                if self._permission_request is not None and key not in {
+                    3,
+                    "\x03",
+                }:
+                    self._handle_permission_key(key)
                     continue
                 if key in {3, "\x03"}:
                     if self._copy_selection():
@@ -225,6 +253,7 @@ class _Tui:
                 self._events = None
                 self._waiting = False
                 self._interrupting = False
+                self._permission_request = None
             elif isinstance(event, ConversationEvent):
                 if self._waiting and event.delta:
                     self.messages[-1] = ("duckduckcode", "")
@@ -251,6 +280,12 @@ class _Tui:
                 role = f"tool:{event.call_id}"
                 if not any(message_role == role for message_role, _ in self.messages):
                     self.messages.append((role, f"→ {event.name} running…"))
+            elif isinstance(event, PermissionRequestEvent):
+                if self._waiting:
+                    self.messages.pop()
+                    self._waiting = False
+                self._permission_request = event
+                self._permission_selection = len(PERMISSION_OPTIONS) - 1
             elif isinstance(event, UsageEvent):
                 self.tokens += event.total_tokens
             elif isinstance(event, TurnCompleteEvent):
@@ -262,10 +297,12 @@ class _Tui:
                 if self._waiting:
                     self.messages.pop()
                 self._waiting = False
+                self._permission_request = None
             elif isinstance(event, ErrorEvent):
                 if self._waiting:
                     self.messages.pop()
-                    self._waiting = False
+                self._waiting = False
+                self._permission_request = None
                 self.messages.append(("error", event.message))
 
     def _animate_wait(self) -> None:
@@ -287,6 +324,29 @@ class _Tui:
                 self.messages.pop()
                 self._waiting = False
         return False
+
+    def _handle_permission_key(self, key: object) -> None:
+        request = self._permission_request
+        if request is None:
+            return
+        if key == curses.KEY_UP:
+            self._permission_selection = (self._permission_selection - 1) % len(
+                PERMISSION_OPTIONS
+            )
+            return
+        if key == curses.KEY_DOWN:
+            self._permission_selection = (self._permission_selection + 1) % len(
+                PERMISSION_OPTIONS
+            )
+            return
+        if key in {27, "\x1b"}:
+            choice: PermissionChoice = "deny"
+        elif key in {10, 13, "\n", "\r"}:
+            choice = PERMISSION_OPTIONS[self._permission_selection][0]
+        else:
+            return
+        self.backend.respond_permission(request.call_id, choice)
+        self._permission_request = None
 
     def _selection(self) -> tuple[int, int] | None:
         if self.selection_anchor is None or self.selection_anchor == self.cursor_index:
@@ -523,11 +583,50 @@ class _Tui:
                 status_right,
                 _color(MUTED_COLOR) | curses.A_DIM,
             )
+        if self._permission_request is not None:
+            self._draw_permission_dialog(height, width)
         self.screen.move(
             input_y + 1 + cursor_row - first_input_row,
             min(width - 1, cursor_column + 2),
         )
         self.screen.refresh()
+
+    def _draw_permission_dialog(self, height: int, width: int) -> None:
+        request = self._permission_request
+        if request is None:
+            return
+        dialog_width = max(1, min(72, width - 4))
+        dialog_height = len(PERMISSION_OPTIONS) + 4
+        top = max(0, (height - dialog_height) // 2)
+        left = max(0, (width - dialog_width) // 2)
+        background = _color(MUTED_COLOR)
+        for row in range(dialog_height):
+            self.screen.addstr(top + row, left, " " * dialog_width, background)
+        self.screen.addstr(
+            top + 1,
+            left + 2,
+            _clip(f"{request.name} 请求权限", max(1, dialog_width - 4)),
+            background | curses.A_BOLD,
+        )
+        self.screen.addstr(
+            top + 2,
+            left + 2,
+            _clip(request.content, max(1, dialog_width - 4)),
+            background,
+        )
+        for index, (_, label) in enumerate(PERMISSION_OPTIONS):
+            attributes = background
+            if index == self._permission_selection:
+                attributes |= curses.A_REVERSE
+            self.screen.addstr(
+                top + 3 + index,
+                left + 2,
+                _clip(
+                    ("› " if index == self._permission_selection else "  ") + label,
+                    max(1, dialog_width - 4),
+                ),
+                attributes,
+            )
 
     def _read_sgr_mouse(self) -> tuple[int, int, int, bool] | None:
         sequence = ""
@@ -680,6 +779,13 @@ def _event_from_json(data: dict[str, Any]) -> AgentEvent:
             str(data.get("name", "")),
             str(data.get("content", "")),
             bool(data.get("is_error", False)),
+        )
+    if event_type == "permission_request":
+        return PermissionRequestEvent(
+            str(data.get("call_id", "")),
+            str(data.get("name", "")),
+            str(data.get("content", "")),
+            str(data.get("message", "")),
         )
     if event_type == "usage":
         return UsageEvent(int(data.get("total_tokens", 0)))

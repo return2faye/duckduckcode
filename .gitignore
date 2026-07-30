@@ -6,6 +6,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .superpowers/
+/.duckduckcode/permissions.local.yaml
 /docs/
 dist/
 *.egg-info/

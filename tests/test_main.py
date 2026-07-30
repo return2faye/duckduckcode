@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from duckduckcode.config import Config
 from duckduckcode.core.event import (
@@ -14,20 +13,31 @@ from duckduckcode.core.event import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from duckduckcode.main import build_agent, run_repl
+from duckduckcode.main import build_agent, main
 from duckduckcode.tools.tool import ToolCall
 
 
 class MainTest(unittest.TestCase):
-    def test_build_agent_registers_core_file_tools(self) -> None:
-        with patch("duckduckcode.main.OpenAIClient", return_value=object()):
-            agent = build_agent(Config("test-key"), Path.cwd())
-        self.addCleanup(agent.close)
-
-        self.assertEqual(
-            [schema["name"] for schema in agent.tools.schemas()],
-            ["ReadFile", "WriteFile", "EditFile", "Glob", "Grep", "Bash"],
+    def setUp(self) -> None:
+        self.home = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+        home_patch = patch(
+            "duckduckcode.permissions.rule_policy.Path.home",
+            return_value=Path(self.home.name),
         )
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
+
+    def test_build_agent_registers_core_file_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+                agent = build_agent(Config("test-key"), Path(directory))
+            self.addCleanup(agent.close)
+
+            self.assertEqual(
+                [schema["name"] for schema in agent.tools.schemas()],
+                ["ReadFile", "WriteFile", "EditFile", "Glob", "Grep", "Bash"],
+            )
 
     def test_build_agent_injects_workspace_into_system_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -159,8 +169,8 @@ class MainTest(unittest.TestCase):
                 },
             )
 
-            self.assertIsNone(agent.permission_checker.check(glob_call))
-            self.assertIsNone(agent.permission_checker.check(grep_call))
+            self.assertEqual(agent.permission_checker.check(glob_call).action, "ask")
+            self.assertEqual(agent.permission_checker.check(grep_call).action, "ask")
             self.assertEqual(agent.tools.execute(glob_call).content, str(source))
             self.assertEqual(
                 agent.tools.execute(grep_call).content,
@@ -202,32 +212,62 @@ class MainTest(unittest.TestCase):
                 events,
             )
 
-    def test_repl_streams_agent_responses_for_multiple_turns(self) -> None:
-        calls = []
+    def test_build_agent_loads_project_permission_rules(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            tempfile.TemporaryDirectory() as home,
+        ):
+            workspace = Path(directory)
+            permissions = workspace / ".duckduckcode" / "permissions.yaml"
+            permissions.parent.mkdir()
+            permissions.write_text(
+                "ask:\n  - Bash(git push*)\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+                patch(
+                    "duckduckcode.permissions.rule_policy.Path.home",
+                    return_value=Path(home),
+                ),
+            ):
+                agent = build_agent(Config("test-key"), workspace)
+            self.addCleanup(agent.close)
 
-        class FakeAgent:
-            def stream(self, message):
-                calls.append(message)
-                yield ConversationEvent("answer ")
-                yield ConversationEvent(str(len(calls)))
-                yield DoneEvent()
+            decision = agent.permission_checker.check(
+                ToolCall("push", "Bash", {"command": "git push origin main"})
+            )
 
-        output = io.StringIO()
+            self.assertEqual(decision.action, "ask")
 
-        run_repl(
-            FakeAgent(),
-            input_stream=io.StringIO("hello\ncontinue\nquit\n"),
-            output_stream=output,
-        )
+    def test_main_launches_tui_without_building_an_unused_agent(self) -> None:
+        config = Config("test-key")
+        with (
+            patch("sys.argv", ["duckduckcode"]),
+            patch("duckduckcode.main.Config.from_env", return_value=config),
+            patch("duckduckcode.main.Path.cwd", return_value=Path("/project")),
+            patch("duckduckcode.main.build_agent") as build,
+            patch("duckduckcode.main.run_tui") as run,
+        ):
+            main()
 
-        self.assertEqual(calls, ["hello", "continue"])
-        self.assertEqual(
-            output.getvalue(),
-            "duckduckcode: 你好，我是 DuckDuckCode。输入 exit 或 quit 结束。\n"
-            "you: duckduckcode: answer 1\n"
-            "you: duckduckcode: answer 2\n"
-            "you: ",
-        )
+        build.assert_not_called()
+        run.assert_called_once_with("o4-mini", "/project")
+
+    def test_internal_backend_builds_and_closes_agent(self) -> None:
+        config = Config("test-key")
+        agent = Mock()
+        with (
+            patch("sys.argv", ["duckduckcode", "--backend"]),
+            patch("duckduckcode.main.Config.from_env", return_value=config),
+            patch("duckduckcode.main.Path.cwd", return_value=Path("/project")),
+            patch("duckduckcode.main.build_agent", return_value=agent),
+            patch("duckduckcode.main.run_backend") as run,
+        ):
+            main()
+
+        run.assert_called_once_with(agent)
+        agent.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 
 from .client import Client
 from .context import ContextManager
@@ -10,6 +10,8 @@ from .event import (
     DoneEvent,
     ErrorEvent,
     LoopCompleteEvent,
+    PermissionChoice,
+    PermissionRequestEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -40,14 +42,18 @@ class Agent:
         self.max_iterations = max_iterations
         self.permission_checker = permission_checker or PermissionChecker()
 
-    def stream(self, user_message: str) -> Iterator[AgentEvent]:
+    def stream(
+        self, user_message: str
+    ) -> Generator[AgentEvent, PermissionChoice | None, None]:
         self.permission_checker.start_task()
         try:
             yield from self._stream(user_message)
         finally:
             self.permission_checker.finish_task()
 
-    def _stream(self, user_message: str) -> Iterator[AgentEvent]:
+    def _stream(
+        self, user_message: str
+    ) -> Generator[AgentEvent, PermissionChoice | None, None]:
         self.context.add_user(user_message)
         self.context.set_tool_schemas(self.tools.schemas())
 
@@ -89,8 +95,8 @@ class Agent:
 
                     completed_results = []
                     if tool_calls:
-                        for tool_call, result in self._execute_tools(tool_calls):
-                            completed_results.append((tool_call, result))
+                        completed_results = yield from self._execute_tools(tool_calls)
+                        for tool_call, result in completed_results:
                             yield ToolResultEvent(
                                 tool_call.call_id,
                                 tool_call.name,
@@ -127,19 +133,44 @@ class Agent:
                 yield LoopCompleteEvent("max_iterations", iteration)
                 return
 
-    def _execute_tools(
-        self, tool_calls: list[ToolCall]
-    ) -> Iterator[tuple[ToolCall, ToolResult]]:
+    def _execute_tools(self, tool_calls: list[ToolCall]) -> Generator[
+        PermissionRequestEvent,
+        PermissionChoice | None,
+        list[tuple[ToolCall, ToolResult]],
+    ]:
         allowed: list[ToolCall] = []
+        completed: list[tuple[ToolCall, ToolResult]] = []
         for tool_call in tool_calls:
-            denial = self.permission_checker.check(tool_call)
-            if denial is None:
+            decision = self.permission_checker.check(tool_call)
+            if decision.action in {"allow", "unspecified"}:
                 allowed.append(tool_call)
                 continue
-            yield from self.tools.execute_many(allowed)
-            allowed.clear()
-            yield tool_call, ToolResult(denial, is_error=True)
-        yield from self.tools.execute_many(allowed)
+            if decision.action == "ask":
+                choice = yield PermissionRequestEvent(
+                    tool_call.call_id,
+                    tool_call.name,
+                    decision.content,
+                    decision.message,
+                )
+                if choice == "allow_always":
+                    self.permission_checker.remember_allow(tool_call)
+                    allowed.append(tool_call)
+                elif choice == "allow_once":
+                    allowed.append(tool_call)
+                else:
+                    completed.append(
+                        (
+                            tool_call,
+                            ToolResult(
+                                "Permission denied by user.",
+                                is_error=True,
+                            ),
+                        )
+                    )
+                continue
+            completed.append((tool_call, ToolResult(decision.message, is_error=True)))
+        completed.extend(self.tools.execute_many(allowed))
+        return completed
 
     def close(self) -> None:
         self.permission_checker.close()

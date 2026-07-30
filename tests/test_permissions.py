@@ -13,6 +13,7 @@ from duckduckcode.core.event import (
     ConversationEvent,
     DoneEvent,
     LoopCompleteEvent,
+    PermissionRequestEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -21,6 +22,7 @@ from duckduckcode.core.event import (
 from duckduckcode.permissions import (
     PathSandbox,
     PermissionChecker,
+    PermissionDecision,
     check_bash_blacklist,
 )
 from duckduckcode.tools.tool import ToolCall, ToolManager
@@ -65,12 +67,11 @@ class PermissionCheckerTest(unittest.TestCase):
 
         for command in commands:
             with self.subTest(command=command):
-                denial = self.checker.check(
+                decision = self.checker.check(
                     ToolCall("call_1", "Bash", {"command": command})
                 )
-                self.assertIsNotNone(denial)
-                assert denial is not None
-                self.assertIn("Permission denied", denial)
+                self.assertEqual(decision.action, "deny")
+                self.assertIn("Permission denied", decision.message)
 
     def test_allows_safe_commands_and_dangerous_words_used_as_arguments(self) -> None:
         calls = [
@@ -108,7 +109,7 @@ class PermissionCheckerTest(unittest.TestCase):
 
         for call in calls:
             with self.subTest(call=call):
-                self.assertIsNone(self.checker.check(call))
+                self.assertEqual(self.checker.check(call).action, "unspecified")
 
 
 class PathSandboxTest(unittest.TestCase):
@@ -231,6 +232,141 @@ class PathSandboxTest(unittest.TestCase):
 
 
 class AgentPermissionTest(unittest.TestCase):
+    def test_asks_before_executing_any_tools_and_resumes_with_user_choice(
+        self,
+    ) -> None:
+        first = ToolCall("call_1", "first", {})
+        second = ToolCall("call_2", "second", {})
+        executed = []
+        remembered = []
+        tools = ToolManager()
+        tools.register(
+            "first",
+            "first",
+            {"type": "object", "properties": {}},
+            lambda: executed.append("first") or "first",
+        )
+        tools.register(
+            "second",
+            "second",
+            {"type": "object", "properties": {}},
+            lambda: executed.append("second") or "second",
+        )
+
+        class FakePolicy:
+            def check(self, tool_call):
+                if tool_call.call_id == "call_2":
+                    return PermissionDecision(
+                        "ask", "approval required", "second input"
+                    )
+                return PermissionDecision("allow", content="first input")
+
+            def remember_allow(self, tool_call):
+                remembered.append(tool_call)
+
+        class FakeClient:
+            calls = 0
+
+            def stream(self, messages, tools=None, reasoning=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(first)
+                    yield ToolCallEvent(second)
+                else:
+                    yield ConversationEvent("done")
+                yield DoneEvent()
+
+        agent = Agent(
+            cast(Client, FakeClient()),
+            tools=tools,
+            permission_checker=PermissionChecker(policy=FakePolicy()),
+        )
+        stream = agent.stream("run both")
+        self.assertEqual(next(stream), ToolCallEvent(first))
+        self.assertEqual(next(stream), ToolCallEvent(second))
+        request = next(stream)
+
+        self.assertEqual(
+            request,
+            PermissionRequestEvent(
+                "call_2",
+                "second",
+                "second input",
+                "approval required",
+            ),
+        )
+        self.assertEqual(executed, [])
+
+        remaining = [stream.send("allow_always"), *stream]
+
+        self.assertEqual(executed, ["first", "second"])
+        self.assertEqual(remembered, [second])
+        self.assertIn(
+            ToolResultEvent("call_1", "first", "first"),
+            remaining,
+        )
+        self.assertIn(
+            ToolResultEvent("call_2", "second", "second"),
+            remaining,
+        )
+
+    def test_rejected_ask_returns_error_without_executing_tool(self) -> None:
+        call = ToolCall("call_1", "Bash", {"command": "git push origin main"})
+        executed = False
+        tools = ToolManager()
+
+        def run(command):
+            nonlocal executed
+            executed = True
+            return command
+
+        tools.register(
+            "Bash",
+            "bash",
+            {"type": "object", "properties": {}},
+            run,
+        )
+
+        class FakePolicy:
+            def check(self, tool_call):
+                return PermissionDecision("ask", "approval required", "git push")
+
+            def remember_allow(self, tool_call):
+                raise AssertionError
+
+        class FakeClient:
+            calls = 0
+
+            def stream(self, messages, tools=None, reasoning=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(call)
+                else:
+                    yield ConversationEvent("adjusted")
+                yield DoneEvent()
+
+        agent = Agent(
+            cast(Client, FakeClient()),
+            tools=tools,
+            permission_checker=PermissionChecker(policy=FakePolicy()),
+        )
+        stream = agent.stream("push")
+        self.assertEqual(next(stream), ToolCallEvent(call))
+        self.assertIsInstance(next(stream), PermissionRequestEvent)
+
+        remaining = [stream.send("deny"), *stream]
+
+        self.assertFalse(executed)
+        self.assertIn(
+            ToolResultEvent(
+                "call_1",
+                "Bash",
+                "Permission denied by user.",
+                is_error=True,
+            ),
+            remaining,
+        )
+
     def test_denied_tool_call_is_not_executed_and_returns_error_to_model(self) -> None:
         call = ToolCall("call_1", "Bash", {"command": "rm -rf build"})
         executed = False

@@ -797,22 +797,24 @@ def _format_tool_result(event: ToolResultEvent, expanded: bool) -> str:
     header = f"{marker} {event.name} {status}"
     if expanded:
         return f"{header} · [收起]\n{event.content}"
+    result_content = _tool_result_content(event)
     if event.is_error:
         summary = next(
-            (line.strip() for line in event.content.splitlines() if line.strip()),
+            (line.strip() for line in result_content.splitlines() if line.strip()),
             "unknown error",
         )
         return f"{header} · {summary[:160]} · [查看详情]"
     if (
-        len(event.content.splitlines()) <= SHORT_TOOL_RESULT_LINES
-        and len(event.content) <= SHORT_TOOL_RESULT_CHARS
+        len(result_content.splitlines()) <= SHORT_TOOL_RESULT_LINES
+        and len(result_content) <= SHORT_TOOL_RESULT_CHARS
     ):
-        return f"{header}\n{event.content}" if event.content else header
+        return f"{header}\n{result_content}" if result_content else header
     return f"{header} · {_tool_result_size(event)} · [查看详情]"
 
 
 def _tool_result_size(event: ToolResultEvent) -> str:
-    lines = event.content.splitlines()
+    content = _tool_result_content(event)
+    lines = content.splitlines()
     if event.name == "Grep":
         matches = sum(bool(re.match(r"^.+:\d+:", line)) for line in lines)
         return f"{matches} matches"
@@ -821,6 +823,17 @@ def _tool_result_size(event: ToolResultEvent) -> str:
         return f"{size / 1024:.1f} KB" if size >= 1024 else f"{size} bytes"
     label = "results" if event.name == "Glob" else "output lines"
     return f"{len(lines)} {label}"
+
+
+def _tool_result_content(event: ToolResultEvent) -> str:
+    if event.name == "Bash":
+        try:
+            output = json.loads(event.content).get("output", "")
+            if isinstance(output, str):
+                return output
+        except (AttributeError, json.JSONDecodeError):
+            pass
+    return event.content
 
 
 def _clipboard_commands(write: bool) -> list[list[str]]:

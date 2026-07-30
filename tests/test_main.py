@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,7 +20,7 @@ class MainTest(unittest.TestCase):
 
         self.assertEqual(
             [schema["name"] for schema in agent.tools.schemas()],
-            ["ReadFile", "WriteFile", "EditFile", "Glob", "Grep"],
+            ["ReadFile", "WriteFile", "EditFile", "Glob", "Grep", "Bash"],
         )
 
     def test_build_agent_injects_workspace_into_system_prompt(self) -> None:
@@ -81,16 +82,22 @@ class MainTest(unittest.TestCase):
                     },
                 )
             )
+            shell = agent.tools.execute(ToolCall("bash", "Bash", {"command": "pwd"}))
 
             self.assertFalse(read.is_error)
             self.assertFalse(edit.is_error)
             self.assertFalse(write.is_error)
             self.assertFalse(found.is_error)
             self.assertFalse(searched.is_error)
+            self.assertFalse(shell.is_error)
             self.assertEqual(source.read_text(encoding="utf-8"), "edited")
             self.assertEqual((workspace / "new.txt").read_text(encoding="utf-8"), "new")
             self.assertEqual(set(found.content.splitlines()), {"new.txt", "source.txt"})
             self.assertEqual(searched.content, "source.txt:1:edited")
+            self.assertEqual(
+                json.loads(shell.content),
+                {"output": f"{workspace.resolve()}\n", "exit_code": 0},
+            )
 
     def test_repl_streams_agent_responses_for_multiple_turns(self) -> None:
         calls = []

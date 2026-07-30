@@ -351,6 +351,30 @@ class TuiTest(unittest.TestCase):
         )
         self.assertNotIn("trace", displayed)
 
+    def test_bash_result_size_uses_output_lines_from_json(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        content = json.dumps(
+            {"output": "".join(f"line {line}\n" for line in range(20)), "exit_code": 0}
+        )
+        tui.messages = [("tool:call_1", "→ Bash running…")]
+        tui.tool_results["call_1"] = ToolResultEvent("call_1", "Bash", content)
+
+        self.assertEqual(
+            tui._display_messages(),
+            [("tool:call_1", "✓ Bash completed · 20 output lines · [查看详情]")],
+        )
+
+    def test_short_bash_result_displays_output_instead_of_json(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        content = json.dumps({"output": "hello\n", "exit_code": 0})
+        tui.messages = [("tool:call_1", "→ Bash running…")]
+        tui.tool_results["call_1"] = ToolResultEvent("call_1", "Bash", content)
+
+        self.assertEqual(
+            tui._display_messages(),
+            [("tool:call_1", "✓ Bash completed\nhello\n")],
+        )
+
     def test_empty_final_turn_removes_the_waiting_placeholder(self) -> None:
         tui = _Tui(object(), "model", "/tmp", object())
         tui.messages = [("duckduckcode", "thinking")]

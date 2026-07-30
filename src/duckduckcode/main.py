@@ -14,6 +14,7 @@ from .interfaces.backend import run_backend
 from .interfaces.tui import run_tui
 from .providers.openai.client import OpenAIClient
 from .tools import (
+    create_bash_tool,
     create_edit_file_tool,
     create_glob_tool,
     create_grep_tool,
@@ -99,6 +100,7 @@ def build_agent(config: Config, workspace: Path) -> Agent:
     tools.register(create_edit_file_tool(workspace))
     tools.register(create_glob_tool(workspace))
     tools.register(create_grep_tool(workspace))
+    tools.register(create_bash_tool(workspace))
     return Agent(
         OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
         ContextManager(

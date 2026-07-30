@@ -40,6 +40,12 @@ class BashTest(unittest.TestCase):
         self.assertIn("Use Bash", self.tool.description)
         self.assertIn("working directory", self.tool.description)
         self.assertIn("120 seconds", self.tool.description)
+        self.assertIn("foreground", self.tool.description)
+        self.assertIn("long-running", self.tool.description)
+        self.assertIn("background", self.tool.description)
+        self.assertIn("log file", self.tool.description)
+        self.assertIn("PID", self.tool.description)
+        self.assertIn("health", self.tool.description)
         self.assertIn("JSON", self.tool.description)
         self.assertIn("200,000 bytes", self.tool.description)
         self.assertEqual(
@@ -51,7 +57,10 @@ class BashTest(unittest.TestCase):
                         "type": "string",
                         "description": (
                             "Shell command to execute from the working directory. "
-                            "Use absolute paths when referring to files."
+                            "Use absolute paths when referring to files. For a "
+                            "long-running service, detach it in the background, "
+                            "redirect stdin and write stdout/stderr to a log file, "
+                            "and print its PID."
                         ),
                     },
                 },

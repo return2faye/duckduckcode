@@ -253,6 +253,13 @@ class ContextManagerTest(unittest.TestCase):
         self.assertIn("Bug fixes:", prompt)
         self.assertIn("Security and safety:", prompt)
         self.assertIn("Use absolute file paths when calling file tools.", prompt)
+        self.assertIn(
+            "Do not refuse to start a long-running service solely because Bash",
+            prompt,
+        )
+        self.assertIn("detached background process", prompt)
+        self.assertIn("log file", prompt)
+        self.assertIn("verify that it started", prompt)
         self.assertIn("OS: TestOS", prompt)
         self.assertIn("Model: test-model", prompt)
         self.assertIn("Working directory: /repo", prompt)

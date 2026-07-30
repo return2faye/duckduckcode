@@ -31,7 +31,10 @@ BASH_PARAMS = {
             "type": "string",
             "description": (
                 "Shell command to execute from the working directory. "
-                "Use absolute paths when referring to files."
+                "Use absolute paths when referring to files. For a "
+                "long-running service, detach it in the background, "
+                "redirect stdin and write stdout/stderr to a log file, "
+                "and print its PID."
             ),
         },
     },
@@ -44,7 +47,7 @@ def create_bash_tool(working_directory: Path | None = None) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
     return create_tool(
         "Bash",
-        "Use Bash only when no dedicated tool fits, such as running tests, package commands, git commands, or inspecting non-text files. Commands execute through the system shell from the working directory and time out after 120 seconds. Results are JSON with merged stdout/stderr in output and the numeric exit_code; output beyond 200,000 bytes is truncated. This tool can modify files or external state, so avoid destructive commands unless the user explicitly confirms them.",
+        "Use Bash only when no dedicated tool fits, such as running tests, package commands, git commands, starting development servers, or inspecting non-text files. Commands execute through the system shell from the working directory. The timeout of 120 seconds applies to the foreground shell process, not a properly detached service. For a long-running service, start it in the background with stdin redirected and stdout/stderr written to a log file, print its PID, then use a follow-up Bash call to check its health. Results are JSON with merged stdout/stderr in output and the numeric exit_code; output beyond 200,000 bytes is truncated. This tool can modify files or external state, so avoid destructive commands unless the user explicitly confirms them.",
         BASH_PARAMS,
         lambda command: _run_bash(base_directory, command),
         _validate_arguments,

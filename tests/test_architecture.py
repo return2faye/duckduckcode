@@ -27,6 +27,7 @@ EXPECTED_MODULES = {
     "providers/openai/stream.py",
     "tools/__init__.py",
     "tools/edit_file.py",
+    "tools/glob.py",
     "tools/read_file.py",
     "tools/tool.py",
     "tools/write_file.py",

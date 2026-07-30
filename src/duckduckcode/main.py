@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import sys
 from typing import TextIO
 
@@ -11,7 +12,12 @@ from .core.event import ConversationEvent, ErrorEvent
 from .interfaces.backend import run_backend
 from .interfaces.tui import run_tui
 from .providers.openai.client import OpenAIClient
-from .tools import create_edit_file_tool, create_read_file_tool, create_write_file_tool
+from .tools import (
+    create_edit_file_tool,
+    create_glob_tool,
+    create_read_file_tool,
+    create_write_file_tool,
+)
 from .tools.tool import ToolManager
 
 
@@ -63,8 +69,9 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
+        workspace = Path.cwd().resolve()
         config = Config.from_env()
-        agent = build_agent(config)
+        agent = build_agent(config, workspace)
         if args.backend:
             run_backend(agent)
             return
@@ -74,7 +81,7 @@ def main() -> None:
             run_repl(agent)
             return
         if not first_prompt or first_prompt == "tui":
-            run_tui(config.openai_model)
+            run_tui(config.openai_model, str(workspace))
             return
         if first_prompt:
             write_stream_response(agent, first_prompt)
@@ -83,11 +90,12 @@ def main() -> None:
         parser.exit(1, f"duckduckcode: error: {exc}\n")
 
 
-def build_agent(config: Config) -> Agent:
+def build_agent(config: Config, workspace: Path) -> Agent:
     tools = ToolManager()
-    tools.register(create_read_file_tool())
-    tools.register(create_write_file_tool())
-    tools.register(create_edit_file_tool())
+    tools.register(create_read_file_tool(workspace))
+    tools.register(create_write_file_tool(workspace))
+    tools.register(create_edit_file_tool(workspace))
+    tools.register(create_glob_tool(workspace))
     return Agent(
         OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
         ContextManager(reasoning=config.reasoning),

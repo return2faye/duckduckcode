@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from fnmatch import fnmatchcase
-from functools import cache
 import io
 import os
 from pathlib import Path
 import re
 from typing import Any
 
+from .glob import _matches_glob
 from .tool import Tool, ToolResult, create_tool
 
 EXCLUDED_DIRECTORIES = {
@@ -249,21 +248,3 @@ def _grep(
     if truncated:
         output.append(f"[Results truncated after {MAX_MATCHES} matches.]")
     return ToolResult("\n".join(output) if output else "(no matches)")
-
-
-def _matches_glob(path_parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool:
-    @cache
-    def match(path_index: int, pattern_index: int) -> bool:
-        if pattern_index == len(pattern_parts):
-            return path_index == len(path_parts)
-        if pattern_parts[pattern_index] == "**":
-            return match(path_index, pattern_index + 1) or (
-                path_index < len(path_parts) and match(path_index + 1, pattern_index)
-            )
-        return (
-            path_index < len(path_parts)
-            and fnmatchcase(path_parts[path_index], pattern_parts[pattern_index])
-            and match(path_index + 1, pattern_index + 1)
-        )
-
-    return match(0, 0)

@@ -120,6 +120,17 @@ class GlobTest(unittest.TestCase):
 
         self.assertEqual(result, ToolResult("(no matches)"))
 
+    def test_does_not_descend_into_symbolic_link_directories(self) -> None:
+        inside = self.root / "inside.py"
+        inside.write_text("inside", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as outside:
+            (Path(outside) / "returned.py").symlink_to(inside)
+            (self.root / "linked").symlink_to(outside, target_is_directory=True)
+
+            result = self.execute(pattern="linked/*.py", path=None)
+
+        self.assertEqual(result, ToolResult("(no matches)"))
+
     def test_rejects_invalid_arguments_and_search_roots(self) -> None:
         file_path = self.root / "file.txt"
         file_path.write_text("", encoding="utf-8")

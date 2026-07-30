@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import glob
+from fnmatch import fnmatchcase
+from functools import cache
+import os
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +44,7 @@ def create_glob_tool(
     )
     return create_tool(
         "Glob",
-        "Use Glob to find file paths by name or project structure before ReadFile, Grep, or EditFile. Provide a relative glob pattern such as **/*.py and an absolute search root inside an allowed directory, or null for the working directory; relative roots are accepted only for compatibility. Supports recursive **, excludes noisy directories, and returns up to 200 newest files first.",
+        "Use Glob to find file paths by name or project structure before ReadFile, Grep, or EditFile. Provide a relative glob pattern such as **/*.py and an absolute search root inside an allowed directory, or null for the working directory; relative roots are accepted only for compatibility. Supports recursive **, excludes noisy and symbolic-link directories, and returns up to 200 newest files first.",
         GLOB_PARAMS,
         lambda pattern, path: _glob(base_directory, allowed, pattern, path),
         _validate_arguments,
@@ -125,20 +127,25 @@ def _glob(
             )
 
         matches: dict[Path, int] = {}
-        for matched in glob.iglob(
-            pattern,
-            root_dir=root,
-            recursive=True,
-            include_hidden=True,
-        ):
-            relative = Path(matched)
-            if EXCLUDED_DIRECTORIES.intersection(relative.parts):
-                continue
-            result = (root / relative).resolve()
-            if result.is_file() and any(
-                result.is_relative_to(allowed) for allowed in allowed_directories
-            ):
-                matches[result] = result.stat().st_mtime_ns
+        pattern_parts = Path(pattern).parts
+        for directory, directory_names, file_names in os.walk(root, followlinks=False):
+            directory_path = Path(directory)
+            directory_names[:] = sorted(
+                name
+                for name in directory_names
+                if name not in EXCLUDED_DIRECTORIES
+                and not (directory_path / name).is_symlink()
+            )
+            for filename in sorted(file_names):
+                file_path = directory_path / filename
+                relative = file_path.relative_to(root)
+                if not _matches_glob(relative.parts, pattern_parts):
+                    continue
+                result = file_path.resolve()
+                if result.is_file() and any(
+                    result.is_relative_to(allowed) for allowed in allowed_directories
+                ):
+                    matches[result] = result.stat().st_mtime_ns
     except PermissionError:
         return ToolResult(
             f"Glob failed: Permission denied while searching '{unresolved}'. "
@@ -162,3 +169,21 @@ def _glob(
             display = result
         paths.append(display.as_posix())
     return ToolResult("\n".join(paths) if paths else "(no matches)")
+
+
+def _matches_glob(path_parts: tuple[str, ...], pattern_parts: tuple[str, ...]) -> bool:
+    @cache
+    def match(path_index: int, pattern_index: int) -> bool:
+        if pattern_index == len(pattern_parts):
+            return path_index == len(path_parts)
+        if pattern_parts[pattern_index] == "**":
+            return match(path_index, pattern_index + 1) or (
+                path_index < len(path_parts) and match(path_index + 1, pattern_index)
+            )
+        return (
+            path_index < len(path_parts)
+            and fnmatchcase(path_parts[path_index], pattern_parts[pattern_index])
+            and match(path_index + 1, pattern_index + 1)
+        )
+
+    return match(0, 0)

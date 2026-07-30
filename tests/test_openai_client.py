@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -26,7 +28,12 @@ from duckduckcode.providers.openai.serialize import (
     OpenAIResponsesDeserializer,
     OpenAIResponsesSerializer,
 )
-from duckduckcode.tools.tool import ToolCall, ToolManager, ToolResult
+from duckduckcode.tools.tool import (
+    ToolCall,
+    ToolManager,
+    ToolResult,
+    create_exit_plan_mode_tool,
+)
 
 
 class FakeResponses:
@@ -47,6 +54,8 @@ class AgentEventTest(unittest.TestCase):
             "TurnCompleteEvent",
             "LoopCompleteEvent",
             "UsageEvent",
+            "PlanReviewEvent",
+            "PlanReviewResponse",
             "AgentEvent",
         }
 
@@ -254,6 +263,15 @@ class ContextManagerTest(unittest.TestCase):
         self.assertIn("Security and safety:", prompt)
         self.assertIn("Use absolute file paths when calling file tools.", prompt)
         self.assertIn(
+            'A normal user message such as "yes", "confirm", or "execute" '
+            "does not approve the plan.",
+            prompt,
+        )
+        self.assertIn(
+            "Never ask for plan approval in ordinary assistant text.",
+            prompt,
+        )
+        self.assertIn(
             "Do not refuse to start a long-running service solely because Bash",
             prompt,
         )
@@ -273,6 +291,36 @@ class ContextManagerTest(unittest.TestCase):
         context = ContextManager(workspace="/repo")
 
         self.assertIn("Working directory: /repo", context.model_messages()[0].content)
+        self.assertIn("Plan Mode:", context.system_prompt)
+        self.assertIn("Plan file: /repo/.duckduckcode/plan.md", context.system_prompt)
+
+    def test_context_injects_runtime_reminder_only_while_plan_mode_is_active(
+        self,
+    ) -> None:
+        context = ContextManager(system_prompt="system prompt")
+        context.add_user("investigate")
+
+        context.set_mode("plan")
+
+        self.assertEqual(
+            context.model_messages(),
+            [
+                Message("system", "system prompt"),
+                Message(
+                    "system",
+                    "Plan Mode is active. Follow the Plan Mode rules in the system "
+                    "prompt. Do not execute the plan until the user approves it.",
+                ),
+                Message("user", "investigate"),
+            ],
+        )
+
+        context.set_mode("default")
+
+        self.assertEqual(
+            context.model_messages(),
+            [Message("system", "system prompt"), Message("user", "investigate")],
+        )
 
     def test_model_messages_include_system_prompt_and_abstraction_first(self) -> None:
         context = ContextManager(system_prompt="system prompt", abstraction="summary")
@@ -378,6 +426,241 @@ class ToolManagerTest(unittest.TestCase):
 
 
 class AgentTest(unittest.TestCase):
+    def test_plan_mode_start_and_cancel_manage_the_plan_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan_file = Path(directory) / "plan.md"
+            plan_file.write_text("stale plan", encoding="utf-8")
+            context = ContextManager(system_prompt="system")
+            agent = Agent(object(), context)
+
+            agent.enter_plan_mode(plan_file)
+
+            self.assertEqual(context.mode, "plan")
+            self.assertFalse(plan_file.exists())
+
+            plan_file.write_text("current plan", encoding="utf-8")
+            agent.cancel_plan_mode()
+
+            self.assertEqual(context.mode, "default")
+            self.assertFalse(plan_file.exists())
+            self.assertEqual(
+                context.messages()[-1],
+                Message(
+                    "user",
+                    "Plan Mode was cancelled. Do not execute the pending plan "
+                    "unless the user asks again.",
+                ),
+            )
+
+    def test_exit_plan_mode_continues_past_preamble_until_execution_starts(
+        self,
+    ) -> None:
+        calls = []
+        tools = ToolManager()
+        tools.register(create_exit_plan_mode_tool())
+        tools.register(
+            "implement",
+            "Implement the plan",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: "implemented",
+        )
+
+        class FakeClient:
+            def stream(self, messages, tools=None, reasoning=None):
+                calls.append(list(messages))
+                if len(calls) == 1:
+                    yield ToolCallEvent(ToolCall("exit", "ExitPlanMode", {}))
+                elif len(calls) == 2:
+                    yield ConversationEvent("I will implement the plan now.")
+                elif len(calls) == 3:
+                    yield ToolCallEvent(ToolCall("implement", "implement", {}))
+                else:
+                    yield ConversationEvent("done")
+                yield DoneEvent()
+
+        with tempfile.TemporaryDirectory() as directory:
+            plan_file = Path(directory) / ".duckduckcode" / "plan.md"
+            plan_file.parent.mkdir()
+            plan_file.write_text("# Plan", encoding="utf-8")
+            context = ContextManager(system_prompt="system prompt")
+            agent = Agent(FakeClient(), context, tools)
+            agent.enter_plan_mode(plan_file)
+            plan_file.write_text("# Plan", encoding="utf-8")
+            stream = agent.stream("plan this")
+
+            self.assertEqual(
+                next(stream),
+                ToolCallEvent(ToolCall("exit", "ExitPlanMode", {})),
+            )
+            self.assertEqual(
+                next(stream),
+                event_module.PlanReviewEvent(str(plan_file.resolve()), "# Plan"),
+            )
+
+            remaining = [
+                stream.send(event_module.PlanReviewResponse(approved=True)),
+                *stream,
+            ]
+            self.assertFalse(plan_file.exists())
+
+        self.assertEqual(context.mode, "default")
+        self.assertIn(
+            ToolResultEvent(
+                "exit",
+                "ExitPlanMode",
+                "Plan approved. Plan Mode is now inactive; execute the plan.",
+            ),
+            remaining,
+        )
+        self.assertIn(ConversationEvent("I will implement the plan now."), remaining)
+        self.assertIn(
+            ToolCallEvent(ToolCall("implement", "implement", {})),
+            remaining,
+        )
+        self.assertIn(
+            ToolResultEvent("implement", "implement", "implemented"),
+            remaining,
+        )
+        self.assertEqual(remaining[-1], LoopCompleteEvent("completed", 4))
+        self.assertFalse(
+            any(
+                message.role == "system"
+                and message.content.startswith("Plan Mode is active.")
+                for message in calls[1]
+            )
+        )
+
+    def test_plan_execution_wait_still_honors_the_iteration_limit(self) -> None:
+        tools = ToolManager()
+        tools.register(create_exit_plan_mode_tool())
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def stream(self, messages, tools=None, reasoning=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(ToolCall("exit", "ExitPlanMode", {}))
+                else:
+                    yield ConversationEvent("I will start next.")
+                yield DoneEvent()
+
+        with tempfile.TemporaryDirectory() as directory:
+            plan_file = Path(directory) / "plan.md"
+            plan_file.write_text("# Plan", encoding="utf-8")
+            agent = Agent(
+                FakeClient(),
+                ContextManager(system_prompt="system"),
+                tools,
+                max_iterations=3,
+            )
+            agent.enter_plan_mode(plan_file)
+            plan_file.write_text("# Plan", encoding="utf-8")
+            stream = agent.stream("plan this")
+            next(stream)
+            next(stream)
+            events = [
+                stream.send(event_module.PlanReviewResponse(approved=True)),
+                *stream,
+            ]
+            self.assertTrue(plan_file.exists())
+
+        self.assertEqual(events[-2].code, "max_iterations")
+        self.assertEqual(events[-1], LoopCompleteEvent("max_iterations", 3))
+
+    def test_failed_plan_execution_preserves_the_plan_file(self) -> None:
+        tools = ToolManager()
+        tools.register(create_exit_plan_mode_tool())
+        tools.register(
+            "fail",
+            "Fail execution",
+            {"type": "object", "properties": {}, "required": []},
+            lambda: ToolResult("failed", is_error=True),
+        )
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def stream(self, messages, tools=None, reasoning=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(ToolCall("exit", "ExitPlanMode", {}))
+                elif self.calls == 2:
+                    yield ToolCallEvent(ToolCall("fail", "fail", {}))
+                else:
+                    yield ConversationEvent("execution failed")
+                yield DoneEvent()
+
+        with tempfile.TemporaryDirectory() as directory:
+            plan_file = Path(directory) / "plan.md"
+            agent = Agent(
+                FakeClient(),
+                ContextManager(system_prompt="system"),
+                tools,
+            )
+            agent.enter_plan_mode(plan_file)
+            plan_file.write_text("# Plan", encoding="utf-8")
+            stream = agent.stream("plan this")
+            next(stream)
+            next(stream)
+            events = [
+                stream.send(event_module.PlanReviewResponse(approved=True)),
+                *stream,
+            ]
+
+            self.assertTrue(plan_file.exists())
+
+        self.assertIn(
+            ToolResultEvent("fail", "fail", "failed", is_error=True),
+            events,
+        )
+
+    def test_plan_review_feedback_keeps_plan_mode_active(self) -> None:
+        calls = []
+        tools = ToolManager()
+        tools.register(create_exit_plan_mode_tool())
+
+        class FakeClient:
+            def stream(self, messages, tools=None, reasoning=None):
+                calls.append(list(messages))
+                if len(calls) == 1:
+                    yield ToolCallEvent(ToolCall("exit", "ExitPlanMode", {}))
+                else:
+                    yield ConversationEvent("revising")
+                yield DoneEvent()
+
+        with tempfile.TemporaryDirectory() as directory:
+            plan_file = Path(directory) / ".duckduckcode" / "plan.md"
+            plan_file.parent.mkdir()
+            plan_file.write_text("# Plan", encoding="utf-8")
+            context = ContextManager(system_prompt="system prompt")
+            agent = Agent(FakeClient(), context, tools)
+            agent.enter_plan_mode(plan_file)
+            plan_file.write_text("# Plan", encoding="utf-8")
+            stream = agent.stream("plan this")
+            next(stream)
+            next(stream)
+
+            remaining = [
+                stream.send(
+                    event_module.PlanReviewResponse(feedback="Use SQLite instead.")
+                ),
+                *stream,
+            ]
+
+        self.assertEqual(context.mode, "plan")
+        self.assertIn(
+            ToolResultEvent(
+                "exit",
+                "ExitPlanMode",
+                "User feedback: Use SQLite instead.",
+            ),
+            remaining,
+        )
+        self.assertIn(ConversationEvent("revising"), remaining)
+
     def test_stream_uses_context_manager(self) -> None:
         calls = []
 

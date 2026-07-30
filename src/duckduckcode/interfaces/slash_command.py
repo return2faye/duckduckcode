@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-_COMMANDS = {"/help": "Show available commands"}
+_COMMANDS = {
+    "/help": "Show available commands",
+    "/plan": "Toggle Plan Mode",
+}
 
 
 def slash_command_suggestions(text: str) -> list[tuple[str, str]] | None:
@@ -17,6 +20,8 @@ def handle_slash_command(text: str) -> tuple[str, str] | None:
     if not text.startswith("/"):
         return None
     command = text.split(maxsplit=1)[0]
+    if command == "/plan":
+        return "mode", "plan"
     if command == "/help":
         commands = "\n".join(
             f"{name}  {description}" for name, description in _COMMANDS.items()

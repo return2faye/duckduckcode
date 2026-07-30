@@ -25,7 +25,7 @@ from duckduckcode.permissions import (
     PermissionDecision,
     check_bash_blacklist,
 )
-from duckduckcode.tools.tool import ToolCall, ToolManager
+from duckduckcode.tools.tool import ToolCall, ToolManager, create_tool
 
 
 class PermissionCheckerTest(unittest.TestCase):
@@ -110,6 +110,137 @@ class PermissionCheckerTest(unittest.TestCase):
         for call in calls:
             with self.subTest(call=call):
                 self.assertEqual(self.checker.check(call).action, "unspecified")
+
+    def test_plan_mode_only_bypasses_prompts_for_safe_exploration_and_plan_file(
+        self,
+    ) -> None:
+        plan_file = Path("/workspace/.duckduckcode/plan.md")
+
+        class AskPolicy:
+            def check(self, tool_call):
+                if tool_call.call_id == "denied":
+                    return PermissionDecision("deny", "explicit deny", "secret")
+                return PermissionDecision("ask", "approval required", "input")
+
+            def remember_allow(self, tool_call):
+                raise AssertionError
+
+        checker = PermissionChecker(policy=AskPolicy())
+        read = create_tool(
+            "ReadFile",
+            "read",
+            {"type": "object", "properties": {}},
+            lambda path: path,
+            lambda arguments: arguments,
+            is_read_only=True,
+        )
+        write = create_tool(
+            "WriteFile",
+            "write",
+            {"type": "object", "properties": {}},
+            lambda path, content: content,
+            lambda arguments: arguments,
+        )
+        bash = create_tool(
+            "Bash",
+            "bash",
+            {"type": "object", "properties": {}},
+            lambda command: command,
+            lambda arguments: arguments,
+        )
+
+        cases = [
+            (
+                ToolCall("read", "ReadFile", {"path": "/workspace/src/app.py"}),
+                read,
+                "allow",
+            ),
+            (
+                ToolCall("denied", "ReadFile", {"path": "/workspace/.env"}),
+                read,
+                "deny",
+            ),
+            (
+                ToolCall(
+                    "plan",
+                    "WriteFile",
+                    {"path": str(plan_file), "content": "plan"},
+                ),
+                write,
+                "allow",
+            ),
+            (
+                ToolCall(
+                    "source",
+                    "WriteFile",
+                    {"path": "/workspace/src/app.py", "content": "code"},
+                ),
+                write,
+                "deny",
+            ),
+            (
+                ToolCall("status", "Bash", {"command": "git status --short"}),
+                bash,
+                "allow",
+            ),
+            (
+                ToolCall(
+                    "no-pager",
+                    "Bash",
+                    {"command": "git --no-pager diff --stat"},
+                ),
+                bash,
+                "allow",
+            ),
+            (
+                ToolCall("checkout", "Bash", {"command": "git checkout main"}),
+                bash,
+                "deny",
+            ),
+            (
+                ToolCall(
+                    "redirect",
+                    "Bash",
+                    {"command": "git status > /tmp/status.txt"},
+                ),
+                bash,
+                "deny",
+            ),
+            (
+                ToolCall(
+                    "background",
+                    "Bash",
+                    {"command": "git status & touch /tmp/changed"},
+                ),
+                bash,
+                "deny",
+            ),
+            (
+                ToolCall(
+                    "output",
+                    "Bash",
+                    {"command": "git diff --output=/tmp/diff.txt"},
+                ),
+                bash,
+                "deny",
+            ),
+            (
+                ToolCall(
+                    "pager",
+                    "Bash",
+                    {"command": "git grep --open-files-in-pager=sh pattern"},
+                ),
+                bash,
+                "deny",
+            ),
+        ]
+
+        for call, tool, action in cases:
+            with self.subTest(call=call.call_id):
+                self.assertEqual(
+                    checker.check(call, tool=tool, plan_file=plan_file).action,
+                    action,
+                )
 
 
 class PathSandboxTest(unittest.TestCase):

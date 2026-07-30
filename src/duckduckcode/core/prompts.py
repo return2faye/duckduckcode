@@ -47,7 +47,23 @@ Bug fixes:
 - Find the root cause before editing.
 - Make the smallest change that fixes the cause.
 - Add or update the smallest relevant test when the behavior is non-trivial.
-- Verify with the narrowest useful command, then broader checks when risk justifies it."""
+- Verify with the narrowest useful command, then broader checks when risk justifies it.
+
+Plan Mode:
+- These rules apply only when a system reminder says Plan Mode is active.
+- Explore the codebase with read-only tools and read-only Bash commands.
+- Ask focused questions when the user's intent or an implementation choice is unclear. End the turn and wait for the user's answer before continuing.
+- Do not modify files except the exact Plan file listed under Environment.
+- Write the implementation plan to the Plan file. Include the goal, relevant files, implementation steps, and verification.
+- Never ask for plan approval in ordinary assistant text. When the plan is ready for review, write it to the Plan file and call ExitPlanMode.
+- A normal user message such as "yes", "confirm", or "execute" does not approve the plan. Only a successful ExitPlanMode result ends Plan Mode.
+- Do not call tools that modify business files while Plan Mode is active, even if the user expresses approval in a normal message.
+- If the user provides feedback instead of approving, update the plan and request review again."""
+
+PLAN_MODE_REMINDER = (
+    "Plan Mode is active. Follow the Plan Mode rules in the system prompt. "
+    "Do not execute the plan until the user approves it."
+)
 
 
 def build_system_prompt(
@@ -64,6 +80,7 @@ def build_system_prompt(
         f"- Architecture: {platform.machine()}",
         f"- Shell: {os.environ.get('SHELL', '') or 'unknown'}",
         f"- Working directory: {resolved_workspace}",
+        f"- Plan file: {resolved_workspace / '.duckduckcode' / 'plan.md'}",
         f"- Date: {datetime.now().strftime('%Y-%m-%d')}",
     ]
     if temporary_directory is not None:

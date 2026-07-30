@@ -14,6 +14,7 @@ from duckduckcode.core.event import (
     ErrorEvent,
     LoopCompleteEvent,
     PermissionRequestEvent,
+    PlanReviewEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -37,6 +38,12 @@ from duckduckcode.tools.tool import ToolCall
 
 
 class TuiTest(unittest.TestCase):
+    def test_pipe_backend_starts_in_a_separate_process_session(self) -> None:
+        with patch("duckduckcode.interfaces.tui.subprocess.Popen") as popen:
+            PipeBackend()
+
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
     def test_wrap_input_uses_terminal_width_for_ascii_and_chinese(self) -> None:
         wrap_input = getattr(tui_module, "_wrap_input", lambda *_args: None)
 
@@ -146,6 +153,52 @@ class TuiTest(unittest.TestCase):
                 "call_id": "call_1",
                 "decision": "allow_always",
             },
+        )
+
+    def test_pipe_backend_writes_plan_mode_and_review_responses(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+
+        process = FakeProcess()
+        backend = PipeBackend(process)
+
+        backend.set_mode("plan")
+        backend.set_mode("default")
+        backend.respond_plan_review(False, "Use SQLite instead")
+
+        process.stdin.seek(0)
+        self.assertEqual(
+            [json.loads(line) for line in process.stdin.read().splitlines()],
+            [
+                {"type": "set_mode", "mode": "plan"},
+                {"type": "set_mode", "mode": "default"},
+                {
+                    "type": "plan_review_response",
+                    "approved": False,
+                    "feedback": "Use SQLite instead",
+                },
+            ],
+        )
+
+    def test_pipe_backend_reads_plan_review_event(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO(
+                    '{"type": "plan_review", '
+                    '"plan_file": "/repo/.duckduckcode/plan.md", '
+                    '"content": "# Plan"}\n'
+                    '{"type": "loop_complete", "reason": "completed", '
+                    '"iterations": 1}\n'
+                )
+
+        self.assertEqual(
+            list(PipeBackend(FakeProcess()).stream("review")),
+            [
+                PlanReviewEvent("/repo/.duckduckcode/plan.md", "# Plan"),
+                LoopCompleteEvent("completed", 1),
+            ],
         )
 
     def test_pipe_backend_cancels_current_process_stream(self) -> None:
@@ -282,7 +335,9 @@ class TuiTest(unittest.TestCase):
                 "/help",
                 (
                     "duckduckcode",
-                    "Available slash commands:\n/help  Show available commands",
+                    "Available slash commands:\n"
+                    "/help  Show available commands\n"
+                    "/plan  Toggle Plan Mode",
                 ),
             ),
             (
@@ -314,8 +369,53 @@ class TuiTest(unittest.TestCase):
             suggestions("/h"),
             [("/help", "Show available commands")],
         )
+        self.assertEqual(suggestions("/p"), [("/plan", "Toggle Plan Mode")])
         self.assertEqual(suggestions("/missing"), [])
         self.assertIsNone(suggestions("hello"))
+
+    def test_plan_slash_command_switches_backend_without_calling_model(self) -> None:
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.modes = []
+
+            def set_mode(self, mode):
+                self.modes.append(mode)
+
+        backend = FakeBackend()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.input = "/plan"
+        tui.cursor_index = len(tui.input)
+
+        tui._send()
+
+        tui.input = "/plan"
+        tui.cursor_index = len(tui.input)
+        tui._send()
+
+        self.assertEqual(backend.modes, ["plan", "default"])
+        self.assertEqual(tui.mode, "default")
+        self.assertEqual(tui.messages, [])
+        self.assertIsNone(tui._events)
+
+    def test_plan_slash_command_enters_plan_mode(self) -> None:
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.modes = []
+
+            def set_mode(self, mode):
+                self.modes.append(mode)
+
+        backend = FakeBackend()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.input = "/plan"
+        tui.cursor_index = len(tui.input)
+
+        tui._send()
+
+        self.assertEqual(backend.modes, ["plan"])
+        self.assertEqual(tui.mode, "plan")
+        self.assertEqual(tui.messages, [])
+        self.assertIsNone(tui._events)
 
     def test_slash_dropdown_uses_arrows_and_enter(self) -> None:
         tui = _Tui(object(), "model", "/tmp", object())
@@ -341,11 +441,125 @@ class TuiTest(unittest.TestCase):
             [
                 (
                     "duckduckcode",
-                    "Available slash commands:\n/help  Show available commands",
+                    "Available slash commands:\n"
+                    "/help  Show available commands\n"
+                    "/plan  Toggle Plan Mode",
                 )
             ],
         )
         self.assertIsNone(tui._events)
+
+    def test_plan_review_requires_an_explicit_approve_selection(self) -> None:
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.responses = []
+
+            def respond_plan_review(self, approved, feedback=""):
+                self.responses.append((approved, feedback))
+
+        backend = FakeBackend()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.mode = "plan"
+        tui._events = queue.Queue()
+        tui._plan_review = PlanReviewEvent("/tmp/.duckduckcode/plan.md", "# Plan")
+
+        tui._handle_plan_review_key("\n")
+
+        self.assertEqual(backend.responses, [(True, "")])
+        self.assertEqual(tui.mode, "default")
+        self.assertIsNone(tui._plan_review)
+
+    def test_plan_review_supports_deny_and_free_form_feedback(self) -> None:
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.responses = []
+
+            def respond_plan_review(self, approved, feedback=""):
+                self.responses.append((approved, feedback))
+
+        backend = FakeBackend()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.mode = "plan"
+        tui._events = queue.Queue()
+        tui._plan_review = PlanReviewEvent("/tmp/.duckduckcode/plan.md", "# Plan")
+
+        tui._handle_plan_review_key(curses.KEY_DOWN)
+        tui._handle_plan_review_key("\n")
+
+        self.assertEqual(backend.responses, [(False, "")])
+        self.assertEqual(tui.mode, "plan")
+
+        tui._plan_review = PlanReviewEvent(
+            "/tmp/.duckduckcode/plan.md", "# Revised Plan"
+        )
+        tui._plan_review_selection = 2
+        tui.input = "Use SQLite instead"
+        tui.cursor_index = len(tui.input)
+
+        tui._handle_plan_review_key("\n")
+
+        self.assertEqual(
+            backend.responses, [(False, ""), (False, "Use SQLite instead")]
+        )
+        self.assertIn(("you", "Use SQLite instead"), tui.messages)
+
+    def test_plan_review_printable_input_selects_feedback(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        tui._plan_review = PlanReviewEvent("/tmp/.duckduckcode/plan.md", "# Plan")
+
+        self.assertFalse(tui._handle_plan_review_key("x"))
+
+        self.assertEqual(tui._plan_review_selection, 2)
+
+    def test_tool_permission_approval_does_not_approve_the_plan(self) -> None:
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.responses = []
+
+            def respond_permission(self, call_id, decision):
+                self.responses.append((call_id, decision))
+
+        backend = FakeBackend()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.mode = "plan"
+        tui._permission_request = PermissionRequestEvent(
+            "call_1", "Bash", "git status", "approval required"
+        )
+        tui._permission_selection = 0
+
+        tui._handle_permission_key("\n")
+
+        self.assertEqual(backend.responses, [("call_1", "allow_once")])
+        self.assertEqual(tui.mode, "plan")
+
+    def test_plan_review_event_keeps_input_available(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        tui.messages = [("duckduckcode", "waiting")]
+        tui._waiting = True
+        tui._events = queue.Queue()
+        tui._events.put(
+            PlanReviewEvent("/tmp/.duckduckcode/plan.md", "# Plan\n\nDo the work.")
+        )
+
+        tui._consume_events()
+        tui._insert_text("change the database")
+
+        self.assertEqual(
+            tui._plan_review,
+            PlanReviewEvent(
+                "/tmp/.duckduckcode/plan.md",
+                "# Plan\n\nDo the work.",
+            ),
+        )
+        self.assertEqual(
+            tui.messages,
+            [
+                ("duckduckcode", "# Plan\n\nDo the work."),
+                ("duckduckcode", "Plan completed"),
+            ],
+        )
+        self.assertEqual(tui.input, "change the database")
+        self.assertFalse(tui._waiting)
 
     def test_escape_interrupts_generation_then_exits_when_idle(self) -> None:
         class FakeBackend:
@@ -372,6 +586,92 @@ class TuiTest(unittest.TestCase):
             [("duckduckcode", "partial"), ("error", "interrupted")],
         )
         self.assertTrue(tui._interrupt_or_exit())
+
+    def test_ctrl_c_exits_cleanly_while_idle(self) -> None:
+        class FakeScreen:
+            def bkgd(self, *_args):
+                pass
+
+            def timeout(self, _value):
+                pass
+
+            def get_wch(self):
+                raise KeyboardInterrupt
+
+        class FakeBackend:
+            def __init__(self):
+                self.closed = 0
+
+            def close(self):
+                self.closed += 1
+
+        backend = FakeBackend()
+        tui = _Tui(FakeScreen(), "model", "/tmp", backend)
+
+        with (
+            patch("duckduckcode.interfaces.tui.curses.curs_set"),
+            patch("duckduckcode.interfaces.tui.curses.set_escdelay"),
+            patch("duckduckcode.interfaces.tui.curses.mousemask"),
+            patch("duckduckcode.interfaces.tui._init_colors"),
+            patch("duckduckcode.interfaces.tui._set_mouse_tracking"),
+            patch("duckduckcode.interfaces.tui._color", return_value=0),
+            patch.object(tui, "_draw"),
+        ):
+            tui.run()
+
+        self.assertEqual(backend.closed, 1)
+
+    def test_ctrl_c_cancels_active_stream_once_without_exiting_with_traceback(
+        self,
+    ) -> None:
+        class FakeScreen:
+            def __init__(self):
+                self.calls = 0
+                self.tui = None
+
+            def bkgd(self, *_args):
+                pass
+
+            def timeout(self, _value):
+                pass
+
+            def get_wch(self):
+                self.calls += 1
+                if self.calls == 1:
+                    self.tui._events.put(LoopCompleteEvent("cancelled", 1))
+                    self.tui._events.put(None)
+                raise KeyboardInterrupt
+
+        class FakeBackend:
+            def __init__(self):
+                self.cancelled = 0
+                self.closed = 0
+
+            def cancel(self):
+                self.cancelled += 1
+
+            def close(self):
+                self.closed += 1
+
+        screen = FakeScreen()
+        backend = FakeBackend()
+        tui = _Tui(screen, "model", "/tmp", backend)
+        screen.tui = tui
+        tui._events = queue.Queue()
+
+        with (
+            patch("duckduckcode.interfaces.tui.curses.curs_set"),
+            patch("duckduckcode.interfaces.tui.curses.set_escdelay"),
+            patch("duckduckcode.interfaces.tui.curses.mousemask"),
+            patch("duckduckcode.interfaces.tui._init_colors"),
+            patch("duckduckcode.interfaces.tui._set_mouse_tracking"),
+            patch("duckduckcode.interfaces.tui._color", return_value=0),
+            patch.object(tui, "_draw"),
+        ):
+            tui.run()
+
+        self.assertEqual(backend.cancelled, 1)
+        self.assertEqual(backend.closed, 1)
 
     def test_consume_events_displays_tools_without_mixing_model_text(self) -> None:
         tui = _Tui(object(), "model", "/tmp", object())
@@ -797,6 +1097,65 @@ class TuiTest(unittest.TestCase):
         self.assertLess(history_row, input_row)
         self.assertLess(input_row, panel_row)
         self.assertLess(panel_row, status_row)
+
+    def test_plan_review_panel_is_below_input_and_shows_plan_status(self) -> None:
+        class FakeScreen:
+            def __init__(self) -> None:
+                self.strings = []
+
+            def erase(self):
+                pass
+
+            def getmaxyx(self):
+                return 20, 80
+
+            def addstr(self, *args):
+                self.strings.append(args)
+
+            def hline(self, *args):
+                pass
+
+            def addch(self, *args):
+                pass
+
+            def move(self, *args):
+                pass
+
+            def refresh(self):
+                pass
+
+        screen = FakeScreen()
+        tui = _Tui(screen, "model", "/tmp", object())
+        tui.mode = "plan"
+        tui.messages = [("you", "history")]
+        tui._plan_review = PlanReviewEvent("/tmp/.duckduckcode/plan.md", "# Plan")
+
+        with (
+            patch("duckduckcode.interfaces.tui._color", return_value=0),
+            patch("duckduckcode.interfaces.tui.curses.ACS_HLINE", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_CKBOARD", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_VLINE", 0, create=True),
+        ):
+            tui._draw()
+
+        input_row = next(args[0] for args in screen.strings if args[2] == "›")
+        panel_row = next(
+            args[0]
+            for args in screen.strings
+            if len(args) >= 3 and "批准并执行" in args[2]
+        )
+        status_row = next(
+            args[0] for args in screen.strings if args[2] == "model · plan"
+        )
+        labels = [args[2].strip("› ") for args in screen.strings]
+        rendered_text = "\n".join(args[2] for args in screen.strings if len(args) >= 3)
+
+        self.assertLess(input_row, panel_row)
+        self.assertLess(panel_row, status_row)
+        self.assertIn("批准并执行", labels)
+        self.assertIn("拒绝计划", labels)
+        self.assertIn("输入修改意见", labels)
+        self.assertNotIn("plan.md", rendered_text)
 
     def test_slash_dropdown_is_below_input_without_covering_chat(self) -> None:
         class FakeScreen:

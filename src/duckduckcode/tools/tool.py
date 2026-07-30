@@ -73,6 +73,28 @@ def create_tool(
     )
 
 
+def create_exit_plan_mode_tool() -> Tool:
+    return create_tool(
+        "ExitPlanMode",
+        "Call ExitPlanMode only when Plan Mode is active and the final plan has "
+        "been written to the Plan file. It asks the user to approve execution or "
+        "provide feedback. Do not call it for ordinary questions or before the "
+        "plan is ready.",
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+        lambda: ToolResult(
+            "ExitPlanMode is handled by the agent while Plan Mode is active.",
+            is_error=True,
+        ),
+        _identity,
+        category="mode",
+    )
+
+
 class ToolManager:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
@@ -123,6 +145,9 @@ class ToolManager:
 
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema() for tool in self._tools.values()]
+
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
 
     def execute(self, tool_call: ToolCall) -> ToolResult:
         if tool_call.name not in self._tools:

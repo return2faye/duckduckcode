@@ -24,7 +24,7 @@ from .tools import (
     create_read_file_tool,
     create_write_file_tool,
 )
-from .tools.tool import ToolManager
+from .tools.tool import ToolManager, create_exit_plan_mode_tool
 
 
 def main() -> None:
@@ -41,6 +41,8 @@ def main() -> None:
             run_backend(agent)
             return
         run_tui(config.openai_model, str(workspace))
+    except KeyboardInterrupt:
+        pass
     except RuntimeError as exc:
         parser.exit(1, f"duckduckcode: error: {exc}\n")
     finally:
@@ -58,10 +60,15 @@ def build_agent(config: Config, workspace: Path) -> Agent:
         tools.register(create_glob_tool(workspace, path_sandbox.allowed_directories))
         tools.register(create_grep_tool(workspace, path_sandbox.allowed_directories))
         tools.register(create_bash_tool(workspace))
+        tools.register(create_exit_plan_mode_tool())
         policy = RulePolicy.load(
             workspace,
             path_sandbox.temporary_directory,
-            {schema["name"] for schema in tools.schemas()},
+            {
+                schema["name"]
+                for schema in tools.schemas()
+                if schema["name"] != "ExitPlanMode"
+            },
         )
         return Agent(
             OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
@@ -78,6 +85,7 @@ def build_agent(config: Config, workspace: Path) -> Agent:
                 [check_bash_blacklist, path_sandbox],
                 policy,
             ),
+            plan_file=workspace / ".duckduckcode" / "plan.md",
         )
     except Exception:
         path_sandbox.close()

@@ -56,6 +56,18 @@ class PermissionRequestEvent:
 
 
 @dataclass(frozen=True)
+class PlanReviewEvent:
+    plan_file: str
+    content: str
+
+
+@dataclass(frozen=True)
+class PlanReviewResponse:
+    approved: bool = False
+    feedback: str = ""
+
+
+@dataclass(frozen=True)
 class TurnCompleteEvent:
     iteration: int
 
@@ -77,6 +89,7 @@ AgentEvent = (
     | ToolCallEvent
     | ToolResultEvent
     | PermissionRequestEvent
+    | PlanReviewEvent
     | TurnCompleteEvent
     | LoopCompleteEvent
     | UsageEvent

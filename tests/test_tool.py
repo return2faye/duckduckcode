@@ -3,7 +3,13 @@ from __future__ import annotations
 import threading
 import unittest
 
-from duckduckcode.tools.tool import ToolCall, ToolManager, ToolResult, create_tool
+from duckduckcode.tools.tool import (
+    ToolCall,
+    ToolManager,
+    ToolResult,
+    create_exit_plan_mode_tool,
+    create_tool,
+)
 
 
 def raise_error(message: str) -> None:
@@ -11,6 +17,15 @@ def raise_error(message: str) -> None:
 
 
 class ToolTest(unittest.TestCase):
+    def test_exit_plan_mode_tool_has_no_arguments_and_cannot_execute_directly(
+        self,
+    ) -> None:
+        tool = create_exit_plan_mode_tool()
+
+        self.assertEqual(tool.name, "ExitPlanMode")
+        self.assertEqual(tool.params["properties"], {})
+        self.assertTrue(tool.handler().is_error)
+
     def test_factory_exposes_metadata_and_model_schema(self) -> None:
         params = {
             "type": "object",

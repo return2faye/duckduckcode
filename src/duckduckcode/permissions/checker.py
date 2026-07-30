@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from pathlib import Path
+import shlex
 from typing import Protocol
 
-from ..tools.tool import ToolCall
+from ..tools.tool import Tool, ToolCall
 from .rule_policy import PermissionDecision
 
 PermissionRule = Callable[[ToolCall], str | None]
+_READ_ONLY_GIT_COMMANDS = {
+    "status",
+    "diff",
+    "log",
+    "show",
+    "rev-parse",
+    "ls-files",
+    "grep",
+}
+_UNSAFE_GIT_OPTIONS = (
+    "--ext-diff",
+    "--open-files-in-pager",
+    "--output",
+    "--textconv",
+)
 
 
 class PermissionPolicy(Protocol):
@@ -24,14 +41,31 @@ class PermissionChecker:
         self._rules = tuple(rules)
         self._policy = policy
 
-    def check(self, tool_call: ToolCall) -> PermissionDecision:
+    def check(
+        self,
+        tool_call: ToolCall,
+        *,
+        tool: Tool | None = None,
+        plan_file: Path | None = None,
+    ) -> PermissionDecision:
         for rule in self._rules:
             denial = rule(tool_call)
             if denial is not None:
                 return PermissionDecision("deny", denial)
         if self._policy is not None:
-            return self._policy.check(tool_call)
-        return PermissionDecision("unspecified")
+            decision = self._policy.check(tool_call)
+        else:
+            decision = PermissionDecision("unspecified")
+        if plan_file is None or decision.action == "deny":
+            return decision
+        if tool is not None and _is_plan_safe(tool_call, tool, plan_file):
+            return PermissionDecision("allow", content=decision.content)
+        return PermissionDecision(
+            "deny",
+            "Plan Mode is active. Write or update the plan file, then call "
+            "ExitPlanMode. Business files cannot be modified before plan approval.",
+            decision.content or _content(tool_call),
+        )
 
     def remember_allow(self, tool_call: ToolCall) -> None:
         if self._policy is None:
@@ -55,3 +89,53 @@ class PermissionChecker:
             close = getattr(rule, "close", None)
             if callable(close):
                 close()
+
+
+def _is_plan_safe(tool_call: ToolCall, tool: Tool, plan_file: Path) -> bool:
+    if tool.is_read_only:
+        return True
+    if tool_call.name in {"WriteFile", "EditFile"}:
+        path = tool_call.arguments.get("path")
+        if not isinstance(path, str):
+            return False
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = plan_file.parent.parent / candidate
+        return candidate.resolve() == plan_file.resolve()
+    if tool_call.name != "Bash":
+        return False
+    command = tool_call.arguments.get("command")
+    if not isinstance(command, str) or any(
+        token in command for token in ("\n", ";", "&", "|", ">", "<", "`", "$(")
+    ):
+        return False
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return False
+    if arguments == ["pwd"]:
+        return True
+    command_index = (
+        2
+        if len(arguments) >= 3
+        and arguments[0] == "git"
+        and arguments[1] == "--no-pager"
+        else 1
+    )
+    return (
+        len(arguments) > command_index
+        and arguments[0] == "git"
+        and arguments[command_index] in _READ_ONLY_GIT_COMMANDS
+        and not any(
+            argument.startswith(_UNSAFE_GIT_OPTIONS)
+            for argument in arguments[command_index + 1 :]
+        )
+    )
+
+
+def _content(tool_call: ToolCall) -> str:
+    for name in ("command", "path"):
+        value = tool_call.arguments.get(name)
+        if isinstance(value, str):
+            return value
+    return tool_call.name

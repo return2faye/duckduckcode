@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ..tools.tool import ToolCall
-from .prompts import build_system_prompt
+from .prompts import PLAN_MODE_REMINDER, build_system_prompt
 
 
 @dataclass(frozen=True)
@@ -72,6 +72,7 @@ class ContextManager:
         self.abstraction = abstraction
         self.reasoning = reasoning or ReasoningConfig()
         self._tool_schemas = tool_schemas or []
+        self.mode: Literal["default", "plan"] = "default"
 
     def add_user(self, content: str) -> None:
         self._messages.append(Message("user", content))
@@ -130,11 +131,16 @@ class ContextManager:
 
     def model_messages(self) -> list[Message]:
         messages = [Message("system", self.system_prompt)]
+        if self.mode == "plan":
+            messages.append(Message("system", PLAN_MODE_REMINDER))
         if self.abstraction:
             messages.append(
                 Message("system", f"Conversation summary:\n{self.abstraction}")
             )
         return messages + self.messages()
+
+    def set_mode(self, mode: Literal["default", "plan"]) -> None:
+        self.mode = mode
 
     def tool_schemas(self) -> list[dict[str, Any]]:
         return list(self._tool_schemas)

@@ -8,6 +8,8 @@ from duckduckcode.core.event import (
     ConversationEvent,
     LoopCompleteEvent,
     PermissionRequestEvent,
+    PlanReviewEvent,
+    PlanReviewResponse,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -18,6 +20,104 @@ from duckduckcode.tools.tool import ToolCall
 
 
 class BackendTest(unittest.TestCase):
+    def test_backend_switches_modes_without_sending_commands_to_model(self) -> None:
+        calls = []
+
+        class FakeAgent:
+            def enter_plan_mode(self):
+                calls.append("plan")
+
+            def cancel_plan_mode(self):
+                calls.append("default")
+
+            def stream(self, message):
+                calls.append(message)
+                yield LoopCompleteEvent("completed", 1)
+
+        run_backend(
+            FakeAgent(),
+            input_stream=io.StringIO(
+                '{"type": "set_mode", "mode": "plan"}\n'
+                '{"type": "set_mode", "mode": "default"}\n'
+                '{"message": "design the feature"}\n'
+            ),
+            output_stream=io.StringIO(),
+        )
+
+        self.assertEqual(calls, ["plan", "default", "design the feature"])
+
+    def test_backend_round_trips_free_form_plan_review_feedback(self) -> None:
+        responses = []
+
+        class FakeAgent:
+            def stream(self, message):
+                response = yield PlanReviewEvent(
+                    "/repo/.duckduckcode/plan.md",
+                    "# Plan\n\nUse SQLite.",
+                )
+                responses.append(response)
+                yield LoopCompleteEvent("completed", 1)
+
+        output = io.StringIO()
+        run_backend(
+            FakeAgent(),
+            input_stream=io.StringIO(
+                '{"message": "plan"}\n'
+                '{"type": "plan_review_response", "approved": false, '
+                '"feedback": "Use SQLite instead"}\n'
+            ),
+            output_stream=output,
+        )
+
+        self.assertEqual(
+            responses,
+            [
+                PlanReviewResponse(
+                    approved=False,
+                    feedback="Use SQLite instead",
+                )
+            ],
+        )
+        self.assertEqual(
+            [json.loads(line) for line in output.getvalue().splitlines()],
+            [
+                {
+                    "type": "plan_review",
+                    "plan_file": "/repo/.duckduckcode/plan.md",
+                    "content": "# Plan\n\nUse SQLite.",
+                },
+                {
+                    "type": "loop_complete",
+                    "reason": "completed",
+                    "iterations": 1,
+                },
+            ],
+        )
+
+    def test_backend_accepts_an_explicit_plan_denial_without_feedback(self) -> None:
+        responses = []
+
+        class FakeAgent:
+            def stream(self, message):
+                response = yield PlanReviewEvent("/repo/plan.md", "# Plan")
+                responses.append((message, response))
+                yield LoopCompleteEvent("completed", 1)
+
+        run_backend(
+            FakeAgent(),
+            input_stream=io.StringIO(
+                '{"message": "plan"}\n'
+                '{"type": "plan_review_response", "approved": false, '
+                '"feedback": ""}\n'
+            ),
+            output_stream=io.StringIO(),
+        )
+
+        self.assertEqual(
+            responses,
+            [("plan", PlanReviewResponse(approved=False, feedback=""))],
+        )
+
     def test_backend_round_trips_permission_responses(self) -> None:
         choices = []
 

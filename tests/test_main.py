@@ -30,13 +30,28 @@ class MainTest(unittest.TestCase):
 
     def test_build_agent_registers_core_file_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
             with patch("duckduckcode.main.OpenAIClient", return_value=object()):
-                agent = build_agent(Config("test-key"), Path(directory))
+                agent = build_agent(Config("test-key"), workspace)
             self.addCleanup(agent.close)
 
             self.assertEqual(
                 [schema["name"] for schema in agent.tools.schemas()],
-                ["ReadFile", "WriteFile", "EditFile", "Glob", "Grep", "Bash"],
+                [
+                    "ReadFile",
+                    "WriteFile",
+                    "EditFile",
+                    "Glob",
+                    "Grep",
+                    "Bash",
+                    "ExitPlanMode",
+                ],
+            )
+            agent.enter_plan_mode()
+            self.assertEqual(agent.context.mode, "plan")
+            self.assertEqual(
+                agent.plan_file,
+                workspace.resolve() / ".duckduckcode" / "plan.md",
             )
 
     def test_build_agent_injects_workspace_into_system_prompt(self) -> None:
@@ -253,6 +268,16 @@ class MainTest(unittest.TestCase):
 
         build.assert_not_called()
         run.assert_called_once_with("o4-mini", "/project")
+
+    def test_main_exits_cleanly_if_tui_receives_keyboard_interrupt(self) -> None:
+        config = Config("test-key")
+        with (
+            patch("sys.argv", ["duckduckcode"]),
+            patch("duckduckcode.main.Config.from_env", return_value=config),
+            patch("duckduckcode.main.Path.cwd", return_value=Path("/project")),
+            patch("duckduckcode.main.run_tui", side_effect=KeyboardInterrupt),
+        ):
+            main()
 
     def test_internal_backend_builds_and_closes_agent(self) -> None:
         config = Config("test-key")

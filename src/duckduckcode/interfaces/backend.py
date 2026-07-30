@@ -12,6 +12,8 @@ from ..core.event import (
     LoopCompleteEvent,
     PermissionChoice,
     PermissionRequestEvent,
+    PlanReviewEvent,
+    PlanReviewResponse,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -34,7 +36,17 @@ def run_backend(
     try:
         for line in input_stream:
             try:
-                message = json.loads(line)["message"]
+                data = json.loads(line)
+                if data.get("type") == "set_mode":
+                    mode = data.get("mode")
+                    if mode == "plan":
+                        agent.enter_plan_mode()
+                    elif mode == "default":
+                        agent.cancel_plan_mode()
+                    else:
+                        raise ValueError("Unsupported agent mode.")
+                    continue
+                message = data["message"]
                 active = True
                 _run_stream(agent, message, input_stream, output_stream)
             except KeyboardInterrupt:
@@ -72,6 +84,9 @@ def _run_stream(
             if isinstance(event, PermissionRequestEvent):
                 choice = _read_permission_response(input_stream, event.call_id)
                 event = stream.send(choice)
+            elif isinstance(event, PlanReviewEvent):
+                response = _read_plan_review_response(input_stream)
+                event = stream.send(response)
             else:
                 event = next(stream)
     except StopIteration:
@@ -93,6 +108,22 @@ def _read_permission_response(input_stream: TextIO, call_id: str) -> PermissionC
     ):
         raise RuntimeError(f"Invalid permission response for '{call_id}'.")
     return data["decision"]
+
+
+def _read_plan_review_response(input_stream: TextIO) -> PlanReviewResponse:
+    line = input_stream.readline()
+    if not line:
+        raise RuntimeError("Plan review response stream closed.")
+    data = json.loads(line)
+    approved = data.get("approved")
+    feedback = data.get("feedback", "")
+    if (
+        data.get("type") != "plan_review_response"
+        or not isinstance(approved, bool)
+        or not isinstance(feedback, str)
+    ):
+        raise RuntimeError("Invalid plan review response.")
+    return PlanReviewResponse(approved, feedback)
 
 
 def _event_to_json(event: object) -> dict[str, object]:
@@ -122,6 +153,12 @@ def _event_to_json(event: object) -> dict[str, object]:
             "name": event.name,
             "content": event.content,
             "message": event.message,
+        }
+    if isinstance(event, PlanReviewEvent):
+        return {
+            "type": "plan_review",
+            "plan_file": event.plan_file,
+            "content": event.content,
         }
     if isinstance(event, UsageEvent):
         return {"type": "usage", "total_tokens": event.total_tokens}

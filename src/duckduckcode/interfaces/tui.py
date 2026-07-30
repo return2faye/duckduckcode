@@ -22,6 +22,7 @@ from ..core.event import (
     LoopCompleteEvent,
     PermissionChoice,
     PermissionRequestEvent,
+    PlanReviewEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -49,6 +50,11 @@ PERMISSION_OPTIONS: tuple[tuple[PermissionChoice, str], ...] = (
     ("allow_always", "始终允许"),
     ("deny", "拒绝"),
 )
+PLAN_REVIEW_OPTIONS = (
+    ("approve", "批准并执行"),
+    ("deny", "拒绝计划"),
+    ("feedback", "输入修改意见"),
+)
 
 
 class PipeBackend:
@@ -60,6 +66,7 @@ class PipeBackend:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
 
     def stream(self, message: str) -> Iterator[AgentEvent]:
@@ -79,6 +86,23 @@ class PipeBackend:
                     "type": "permission_response",
                     "call_id": call_id,
                     "decision": decision,
+                }
+            )
+            + "\n"
+        )
+        self.process.stdin.flush()
+
+    def set_mode(self, mode: str) -> None:
+        self.process.stdin.write(json.dumps({"type": "set_mode", "mode": mode}) + "\n")
+        self.process.stdin.flush()
+
+    def respond_plan_review(self, approved: bool, feedback: str = "") -> None:
+        self.process.stdin.write(
+            json.dumps(
+                {
+                    "type": "plan_review_response",
+                    "approved": approved,
+                    "feedback": feedback,
                 }
             )
             + "\n"
@@ -132,7 +156,10 @@ class _Tui:
         self._interrupting = False
         self._permission_request: PermissionRequestEvent | None = None
         self._permission_selection = len(PERMISSION_OPTIONS) - 1
+        self._plan_review: PlanReviewEvent | None = None
+        self._plan_review_selection = 0
         self._slash_selection = 0
+        self.mode = "default"
 
     def run(self) -> None:
         curses.curs_set(1)
@@ -152,11 +179,17 @@ class _Tui:
                     key = self.screen.get_wch()
                 except curses.error:
                     continue
+                except KeyboardInterrupt:
+                    if self._interrupt_or_exit():
+                        break
+                    continue
                 if self._permission_request is not None and key not in {
                     3,
                     "\x03",
                 }:
                     self._handle_permission_key(key)
+                    continue
+                if self._plan_review is not None and self._handle_plan_review_key(key):
                     continue
                 if self._handle_slash_key(key):
                     continue
@@ -221,6 +254,24 @@ class _Tui:
             self.backend.close()
 
     def _send(self) -> None:
+        if self._plan_review is not None:
+            choice = PLAN_REVIEW_OPTIONS[self._plan_review_selection][0]
+            feedback = self.input.strip() if choice == "feedback" else ""
+            if choice == "feedback" and not feedback:
+                return
+            if feedback:
+                self.messages.append(("you", feedback))
+            self.backend.respond_plan_review(choice == "approve", feedback)
+            self._plan_review = None
+            if choice == "approve":
+                self.mode = "default"
+            self.messages.append(("duckduckcode", ""))
+            self._waiting = True
+            self._wait_frame = 0
+            self.input = ""
+            self.cursor_index = 0
+            self.selection_anchor = None
+            return
         if self._events is not None:
             return
         prompt = self.input.strip()
@@ -230,7 +281,11 @@ class _Tui:
         self.scroll_offset = 0
         slash_command = handle_slash_command(prompt)
         if slash_command is not None:
-            self.messages.append(slash_command)
+            if slash_command[0] == "mode":
+                self.mode = "default" if self.mode == "plan" else "plan"
+                self.backend.set_mode(self.mode)
+            else:
+                self.messages.append(slash_command)
             self.input = ""
             self.cursor_index = 0
             self.selection_anchor = None
@@ -266,6 +321,7 @@ class _Tui:
                 self._waiting = False
                 self._interrupting = False
                 self._permission_request = None
+                self._plan_review = None
             elif isinstance(event, ConversationEvent):
                 if self._waiting and event.delta:
                     self.messages[-1] = ("duckduckcode", "")
@@ -298,6 +354,14 @@ class _Tui:
                     self._waiting = False
                 self._permission_request = event
                 self._permission_selection = len(PERMISSION_OPTIONS) - 1
+            elif isinstance(event, PlanReviewEvent):
+                if self._waiting:
+                    self.messages.pop()
+                    self._waiting = False
+                self._plan_review = event
+                self._plan_review_selection = 0
+                self.messages.append(("duckduckcode", event.content))
+                self.messages.append(("duckduckcode", "Plan completed"))
             elif isinstance(event, UsageEvent):
                 self.tokens += event.total_tokens
             elif isinstance(event, TurnCompleteEvent):
@@ -310,11 +374,13 @@ class _Tui:
                     self.messages.pop()
                 self._waiting = False
                 self._permission_request = None
+                self._plan_review = None
             elif isinstance(event, ErrorEvent):
                 if self._waiting:
                     self.messages.pop()
                 self._waiting = False
                 self._permission_request = None
+                self._plan_review = None
                 self.messages.append(("error", event.message))
 
     def _animate_wait(self) -> None:
@@ -360,7 +426,33 @@ class _Tui:
         self.backend.respond_permission(request.call_id, choice)
         self._permission_request = None
 
+    def _handle_plan_review_key(self, key: object) -> bool:
+        if self._plan_review is None:
+            return False
+        if key == curses.KEY_UP:
+            self._plan_review_selection = (self._plan_review_selection - 1) % len(
+                PLAN_REVIEW_OPTIONS
+            )
+            return True
+        if key == curses.KEY_DOWN:
+            self._plan_review_selection = (self._plan_review_selection + 1) % len(
+                PLAN_REVIEW_OPTIONS
+            )
+            return True
+        if key in {27, "\x1b"}:
+            self._plan_review_selection = 1
+            self._send()
+            return True
+        if key in {10, 13, "\n", "\r"}:
+            self._send()
+            return True
+        if isinstance(key, str) and key >= " ":
+            self._plan_review_selection = 2
+        return False
+
     def _handle_slash_key(self, key: object) -> bool:
+        if self._plan_review is not None:
+            return False
         suggestions = slash_command_suggestions(self.input)
         if suggestions is None:
             return False
@@ -491,9 +583,12 @@ class _Tui:
         permission_height = (
             len(PERMISSION_OPTIONS) + 3 if self._permission_request is not None else 0
         )
+        plan_review_height = (
+            len(PLAN_REVIEW_OPTIONS) + 1 if self._plan_review is not None else 0
+        )
         slash_suggestions = (
             slash_command_suggestions(self.input)
-            if self._permission_request is None
+            if self._permission_request is None and self._plan_review is None
             else None
         )
         if slash_suggestions:
@@ -503,7 +598,7 @@ class _Tui:
         slash_height = (
             max(1, len(slash_suggestions)) + 1 if slash_suggestions is not None else 0
         )
-        panel_height = permission_height or slash_height
+        panel_height = permission_height or plan_review_height or slash_height
         max_input_rows = max(
             1,
             min(
@@ -629,7 +724,7 @@ class _Tui:
             width,
             separator,
         )
-        status_left = self.model
+        status_left = f"{self.model} · plan" if self.mode == "plan" else self.model
         status_right = f"{self.tokens:,} tokens"
         self.screen.addstr(
             height - 1, 0, _clip(status_left, width), _color(MUTED_COLOR)
@@ -647,6 +742,12 @@ class _Tui:
                 width,
                 separator,
             )
+        elif self._plan_review is not None:
+            self._draw_plan_review(
+                input_y + len(visible_input) + 2,
+                width,
+                separator,
+            )
         elif slash_suggestions is not None:
             self._draw_slash_panel(
                 input_y + len(visible_input) + 2,
@@ -659,6 +760,30 @@ class _Tui:
             min(width - 1, cursor_column + 2),
         )
         self.screen.refresh()
+
+    def _draw_plan_review(self, top: int, width: int, separator: int) -> None:
+        if self._plan_review is None:
+            return
+        for index, (_, label) in enumerate(PLAN_REVIEW_OPTIONS):
+            attributes = _color(TEXT_COLOR)
+            if index == self._plan_review_selection:
+                attributes |= curses.A_REVERSE
+            self.screen.addstr(
+                top + index,
+                2,
+                _clip(
+                    ("› " if index == self._plan_review_selection else "  ") + label,
+                    max(1, width - 2),
+                ),
+                attributes,
+            )
+        self.screen.hline(
+            top + len(PLAN_REVIEW_OPTIONS),
+            0,
+            curses.ACS_HLINE,
+            width,
+            separator,
+        )
 
     def _draw_permission_panel(
         self,
@@ -896,6 +1021,11 @@ def _event_from_json(data: dict[str, Any]) -> AgentEvent:
             str(data.get("name", "")),
             str(data.get("content", "")),
             str(data.get("message", "")),
+        )
+    if event_type == "plan_review":
+        return PlanReviewEvent(
+            str(data.get("plan_file", "")),
+            str(data.get("content", "")),
         )
     if event_type == "usage":
         return UsageEvent(int(data.get("total_tokens", 0)))

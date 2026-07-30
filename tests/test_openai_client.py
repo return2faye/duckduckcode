@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from duckduckcode.core import event as event_module
@@ -439,6 +441,73 @@ class AgentTest(unittest.TestCase):
         )
         self.assertEqual(calls[0][1], tool_manager.schemas())
 
+    def test_stream_batches_tool_calls_and_emits_results_as_completed(self) -> None:
+        first = ToolCall("call_1", "first", {})
+        second = ToolCall("call_2", "second", {})
+        batches = []
+
+        class CompletingOutOfOrder:
+            def schemas(self):
+                return []
+
+            def execute_many(self, tool_calls):
+                batches.append(list(tool_calls))
+                yield second, ToolResult("second result")
+                yield first, ToolResult("first result")
+
+        class FakeClient:
+            calls = 0
+
+            def stream(self, messages, tools=None, reasoning=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(first)
+                    yield ToolCallEvent(second)
+                    yield DoneEvent(4)
+                    return
+                yield ConversationEvent("done")
+                yield DoneEvent(1)
+
+        context = ContextManager()
+        events = list(
+            Agent(FakeClient(), context, CompletingOutOfOrder()).stream("use tools")
+        )
+
+        self.assertEqual(batches, [[first, second]])
+        self.assertEqual(
+            events,
+            [
+                ToolCallEvent(first),
+                ToolCallEvent(second),
+                ToolResultEvent("call_2", "second", "second result"),
+                ToolResultEvent("call_1", "first", "first result"),
+                UsageEvent(4),
+                TurnCompleteEvent(1),
+                ConversationEvent("done"),
+                UsageEvent(1),
+                TurnCompleteEvent(2),
+                LoopCompleteEvent("completed", 2),
+            ],
+        )
+        self.assertEqual(
+            context.messages(),
+            [
+                Message("user", "use tools"),
+                Message("assistant", "", status="completed", token_usage=4),
+                Message.tool_call("call_1", "first", {}),
+                Message.tool_call("call_2", "second", {}),
+                Message.tool_result(
+                    "call_2",
+                    '{"content": "second result", "isError": false}',
+                ),
+                Message.tool_result(
+                    "call_1",
+                    '{"content": "first result", "isError": false}',
+                ),
+                Message("assistant", "done", status="completed", token_usage=1),
+            ],
+        )
+
     def test_stream_returns_unknown_tool_errors_to_the_model(self) -> None:
         calls = []
         tool_manager = ToolManager()
@@ -628,6 +697,95 @@ class AgentTest(unittest.TestCase):
             context.messages(),
             [
                 Message("user", "stop"),
+                Message("assistant", "", status="error"),
+            ],
+        )
+
+    def test_keyboard_interrupt_cancels_pending_safe_tools_and_discards_results(
+        self,
+    ) -> None:
+        tool_manager = ToolManager()
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+        slow_finished = threading.Event()
+        release_pending = threading.Event()
+        cancelled_started = threading.Event()
+
+        def slow():
+            slow_started.set()
+            release_slow.wait(5)
+            slow_finished.set()
+            return "slow"
+
+        def interrupt():
+            slow_started.wait(1)
+            raise KeyboardInterrupt
+
+        def pending_running():
+            release_pending.wait(5)
+            return "pending"
+
+        def pending_cancelled():
+            cancelled_started.set()
+            return "cancelled"
+
+        for name, handler in (
+            ("slow", slow),
+            ("interrupt", interrupt),
+            ("pending_running", pending_running),
+            ("pending_cancelled", pending_cancelled),
+        ):
+            tool_manager.register(
+                name,
+                name,
+                {"type": "object", "properties": {}},
+                handler,
+                is_concurrency_safe=True,
+            )
+
+        class FakeClient:
+            def stream(self, messages, tools=None, reasoning=None):
+                for name in (
+                    "slow",
+                    "interrupt",
+                    "pending_running",
+                    "pending_cancelled",
+                ):
+                    yield ToolCallEvent(ToolCall(f"call_{name}", name, {}))
+                yield DoneEvent()
+
+        context = ContextManager()
+        try:
+            with patch(
+                "duckduckcode.tools.tool.ThreadPoolExecutor",
+                side_effect=lambda: ThreadPoolExecutor(max_workers=2),
+            ):
+                events = list(
+                    Agent(FakeClient(), context, tool_manager).stream("cancel")
+                )
+        finally:
+            release_slow.set()
+            release_pending.set()
+
+        self.assertEqual(
+            events,
+            [
+                ToolCallEvent(ToolCall("call_slow", "slow", {})),
+                ToolCallEvent(ToolCall("call_interrupt", "interrupt", {})),
+                ToolCallEvent(ToolCall("call_pending_running", "pending_running", {})),
+                ToolCallEvent(
+                    ToolCall("call_pending_cancelled", "pending_cancelled", {})
+                ),
+                ErrorEvent("interrupted", "interrupted"),
+                LoopCompleteEvent("cancelled", 1),
+            ],
+        )
+        self.assertFalse(cancelled_started.is_set())
+        self.assertTrue(slow_finished.wait(1))
+        self.assertEqual(
+            context.messages(),
+            [
+                Message("user", "cancel"),
                 Message("assistant", "", status="error"),
             ],
         )

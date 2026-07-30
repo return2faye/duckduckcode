@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from queue import Queue
 from typing import Any, Callable
 
 Validator = Callable[[dict[str, Any]], dict[str, Any]]
@@ -136,6 +139,49 @@ class ToolManager:
             return ToolResult(result if isinstance(result, str) else json.dumps(result))
         except Exception as exc:
             return ToolResult(str(exc), is_error=True)
+
+    def execute_many(
+        self, tool_calls: list[ToolCall]
+    ) -> Iterator[tuple[ToolCall, ToolResult]]:
+        safe_batch: list[ToolCall] = []
+        for tool_call in tool_calls:
+            tool = self._tools.get(tool_call.name)
+            if tool is not None and tool.is_concurrency_safe:
+                safe_batch.append(tool_call)
+                continue
+            yield from self._execute_safe_batch(safe_batch)
+            safe_batch.clear()
+            yield tool_call, self.execute(tool_call)
+        yield from self._execute_safe_batch(safe_batch)
+
+    def _execute_safe_batch(
+        self, tool_calls: list[ToolCall]
+    ) -> Iterator[tuple[ToolCall, ToolResult]]:
+        if len(tool_calls) == 1:
+            yield tool_calls[0], self.execute(tool_calls[0])
+            return
+        if not tool_calls:
+            return
+
+        completed: Queue[tuple[ToolCall, ToolResult | BaseException]] = Queue()
+
+        def execute(tool_call: ToolCall) -> None:
+            try:
+                result: ToolResult | BaseException = self.execute(tool_call)
+            except BaseException as exc:
+                result = exc
+            completed.put((tool_call, result))
+
+        executor = ThreadPoolExecutor()
+        futures = [executor.submit(execute, tool_call) for tool_call in tool_calls]
+        try:
+            for _ in futures:
+                tool_call, result = completed.get()
+                if isinstance(result, BaseException):
+                    raise result
+                yield tool_call, result
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _identity(arguments: dict[str, Any]) -> dict[str, Any]:

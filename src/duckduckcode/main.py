@@ -12,6 +12,7 @@ from .core.event import ConversationEvent, ErrorEvent
 from .core.prompts import build_system_prompt
 from .interfaces.backend import run_backend
 from .interfaces.tui import run_tui
+from .permissions import PermissionChecker, check_bash_blacklist
 from .providers.openai.client import OpenAIClient
 from .tools import (
     create_bash_tool,
@@ -108,6 +109,7 @@ def build_agent(config: Config, workspace: Path) -> Agent:
             reasoning=config.reasoning,
         ),
         tools,
+        permission_checker=PermissionChecker([check_bash_blacklist]),
     )
 
 

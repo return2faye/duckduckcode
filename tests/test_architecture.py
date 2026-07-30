@@ -20,6 +20,9 @@ EXPECTED_MODULES = {
     "interfaces/__init__.py",
     "interfaces/backend.py",
     "interfaces/tui.py",
+    "permissions/__init__.py",
+    "permissions/bash_blacklist.py",
+    "permissions/checker.py",
     "providers/__init__.py",
     "providers/openai/__init__.py",
     "providers/openai/client.py",
@@ -50,9 +53,10 @@ LEGACY_MODULES = {
 ALLOWED_DEPENDENCIES = {
     "root": set(),
     "config": {"core"},
-    "main": {"config", "core", "interfaces", "providers", "tools"},
-    "core": {"core", "tools"},
+    "main": {"config", "core", "interfaces", "permissions", "providers", "tools"},
+    "core": {"core", "permissions", "tools"},
     "interfaces": {"core", "interfaces"},
+    "permissions": {"permissions", "tools"},
     "providers": {"core", "providers", "tools"},
     "tools": {"tools"},
 }

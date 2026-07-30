@@ -8,7 +8,12 @@ import unittest
 from unittest.mock import patch
 
 from duckduckcode.config import Config
-from duckduckcode.core.event import ConversationEvent, DoneEvent
+from duckduckcode.core.event import (
+    ConversationEvent,
+    DoneEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 from duckduckcode.main import build_agent, run_repl
 from duckduckcode.tools.tool import ToolCall
 
@@ -97,6 +102,41 @@ class MainTest(unittest.TestCase):
             self.assertEqual(
                 json.loads(shell.content),
                 {"output": f"{workspace.resolve()}\n", "exit_code": 0},
+            )
+
+    def test_build_agent_rejects_blacklisted_bash_commands(self) -> None:
+        call = ToolCall("call_1", "Bash", {"command": "rm -rf build"})
+
+        class FakeClient:
+            calls = 0
+
+            def stream(self, messages, tools=None, reasoning=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(call)
+                else:
+                    yield ConversationEvent("adjusted")
+                yield DoneEvent()
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            marker = workspace / "build" / "marker.txt"
+            marker.parent.mkdir()
+            marker.write_text("keep", encoding="utf-8")
+            with patch("duckduckcode.main.OpenAIClient", return_value=FakeClient()):
+                events = list(
+                    build_agent(Config("test-key"), workspace).stream("remove build")
+                )
+
+            self.assertTrue(marker.exists())
+            self.assertIn(
+                ToolResultEvent(
+                    "call_1",
+                    "Bash",
+                    "Permission denied: Bash command matches blocked rule 'rm -rf'.",
+                    is_error=True,
+                ),
+                events,
             )
 
     def test_repl_streams_agent_responses_for_multiple_turns(self) -> None:

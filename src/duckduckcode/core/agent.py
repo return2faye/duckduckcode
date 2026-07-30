@@ -15,7 +15,8 @@ from .event import (
     TurnCompleteEvent,
     UsageEvent,
 )
-from ..tools.tool import ToolManager
+from ..permissions import PermissionChecker
+from ..tools.tool import ToolCall, ToolManager, ToolResult
 
 
 class Agent:
@@ -25,6 +26,7 @@ class Agent:
         context: ContextManager | None = None,
         tools: ToolManager | None = None,
         max_iterations: int = 50,
+        permission_checker: PermissionChecker | None = None,
     ) -> None:
         if (
             isinstance(max_iterations, bool)
@@ -36,6 +38,7 @@ class Agent:
         self.context = context or ContextManager()
         self.tools = tools or ToolManager()
         self.max_iterations = max_iterations
+        self.permission_checker = permission_checker or PermissionChecker()
 
     def stream(self, user_message: str) -> Iterator[AgentEvent]:
         self.context.add_user(user_message)
@@ -79,7 +82,7 @@ class Agent:
 
                     completed_results = []
                     if tool_calls:
-                        for tool_call, result in self.tools.execute_many(tool_calls):
+                        for tool_call, result in self._execute_tools(tool_calls):
                             completed_results.append((tool_call, result))
                             yield ToolResultEvent(
                                 tool_call.call_id,
@@ -116,3 +119,17 @@ class Agent:
                 )
                 yield LoopCompleteEvent("max_iterations", iteration)
                 return
+
+    def _execute_tools(
+        self, tool_calls: list[ToolCall]
+    ) -> Iterator[tuple[ToolCall, ToolResult]]:
+        allowed: list[ToolCall] = []
+        for tool_call in tool_calls:
+            denial = self.permission_checker.check(tool_call)
+            if denial is None:
+                allowed.append(tool_call)
+                continue
+            yield from self.tools.execute_many(allowed)
+            allowed.clear()
+            yield tool_call, ToolResult(denial, is_error=True)
+        yield from self.tools.execute_many(allowed)

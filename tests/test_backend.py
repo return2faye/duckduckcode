@@ -4,8 +4,16 @@ import io
 import json
 import unittest
 
-from duckduckcode.core.event import ConversationEvent, DoneEvent
+from duckduckcode.core.event import (
+    ConversationEvent,
+    LoopCompleteEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    TurnCompleteEvent,
+    UsageEvent,
+)
 from duckduckcode.interfaces.backend import run_backend
+from duckduckcode.tools.tool import ToolCall
 
 
 class BackendTest(unittest.TestCase):
@@ -16,7 +24,13 @@ class BackendTest(unittest.TestCase):
             def stream(self, message):
                 calls.append(message)
                 yield ConversationEvent("hi")
-                yield DoneEvent(token_usage=7)
+                yield ToolCallEvent(
+                    ToolCall("call_1", "ReadFile", {"path": "README.md"})
+                )
+                yield ToolResultEvent("call_1", "ReadFile", "contents")
+                yield UsageEvent(7)
+                yield TurnCompleteEvent(1)
+                yield LoopCompleteEvent("completed", 1)
 
         output = io.StringIO()
 
@@ -29,7 +43,29 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(calls, ["hello"])
         self.assertEqual(
             [json.loads(line) for line in output.getvalue().splitlines()],
-            [{"type": "delta", "text": "hi"}, {"type": "done", "token_usage": 7}],
+            [
+                {"type": "stream_text", "delta": "hi"},
+                {
+                    "type": "tool_use",
+                    "call_id": "call_1",
+                    "name": "ReadFile",
+                    "arguments": {"path": "README.md"},
+                },
+                {
+                    "type": "tool_result",
+                    "call_id": "call_1",
+                    "name": "ReadFile",
+                    "content": "contents",
+                    "is_error": False,
+                },
+                {"type": "usage", "total_tokens": 7},
+                {"type": "turn_complete", "iteration": 1},
+                {
+                    "type": "loop_complete",
+                    "reason": "completed",
+                    "iterations": 1,
+                },
+            ],
         )
 
     def test_backend_survives_interrupted_stream(self) -> None:
@@ -39,7 +75,7 @@ class BackendTest(unittest.TestCase):
                     yield ConversationEvent("partial")
                     raise KeyboardInterrupt
                 yield ConversationEvent("next")
-                yield DoneEvent()
+                yield LoopCompleteEvent("completed", 1)
 
         output = io.StringIO()
 
@@ -52,10 +88,45 @@ class BackendTest(unittest.TestCase):
         self.assertEqual(
             [json.loads(line) for line in output.getvalue().splitlines()],
             [
-                {"type": "delta", "text": "partial"},
+                {"type": "stream_text", "delta": "partial"},
                 {"type": "error", "message": "interrupted", "code": "interrupted"},
-                {"type": "delta", "text": "next"},
-                {"type": "done", "token_usage": 0},
+                {
+                    "type": "loop_complete",
+                    "reason": "cancelled",
+                    "iterations": 0,
+                },
+                {"type": "stream_text", "delta": "next"},
+                {
+                    "type": "loop_complete",
+                    "reason": "completed",
+                    "iterations": 1,
+                },
+            ],
+        )
+
+    def test_backend_closes_unexpected_failures(self) -> None:
+        class FakeAgent:
+            def stream(self, message):
+                raise RuntimeError("broken")
+                yield
+
+        output = io.StringIO()
+
+        run_backend(
+            FakeAgent(),
+            input_stream=io.StringIO('{"message": "hello"}\n'),
+            output_stream=output,
+        )
+
+        self.assertEqual(
+            [json.loads(line) for line in output.getvalue().splitlines()],
+            [
+                {"type": "error", "message": "broken", "code": "error"},
+                {
+                    "type": "loop_complete",
+                    "reason": "error",
+                    "iterations": 0,
+                },
             ],
         )
 

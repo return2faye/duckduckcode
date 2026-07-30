@@ -4,6 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
+from duckduckcode.core import event as event_module
 from duckduckcode.core.agent import Agent
 from duckduckcode.core.client import ClientResponse
 from duckduckcode.core.context import ContextManager, Message, ReasoningConfig
@@ -11,7 +12,11 @@ from duckduckcode.core.event import (
     ConversationEvent,
     DoneEvent,
     ErrorEvent,
+    LoopCompleteEvent,
     ToolCallEvent,
+    ToolResultEvent,
+    TurnCompleteEvent,
+    UsageEvent,
 )
 from duckduckcode.providers.openai.client import OpenAIClient
 from duckduckcode.providers.openai.serialize import (
@@ -30,6 +35,19 @@ class FakeResponses:
         return [
             type("Event", (), {"type": "response.output_text.delta", "delta": "ok"})()
         ]
+
+
+class AgentEventTest(unittest.TestCase):
+    def test_exposes_react_loop_event_types(self) -> None:
+        expected = {
+            "ToolResultEvent",
+            "TurnCompleteEvent",
+            "LoopCompleteEvent",
+            "UsageEvent",
+            "AgentEvent",
+        }
+
+        self.assertEqual(expected - set(dir(event_module)), set())
 
 
 class OpenAIClientTest(unittest.TestCase):
@@ -332,10 +350,22 @@ class AgentTest(unittest.TestCase):
         agent = Agent(FakeClient(), context)
 
         self.assertEqual(
-            list(agent.stream("hello")), [ConversationEvent("answer 1"), DoneEvent()]
+            list(agent.stream("hello")),
+            [
+                ConversationEvent("answer 1"),
+                UsageEvent(0),
+                TurnCompleteEvent(1),
+                LoopCompleteEvent("completed", 1),
+            ],
         )
         self.assertEqual(
-            list(agent.stream("continue")), [ConversationEvent("answer 2"), DoneEvent()]
+            list(agent.stream("continue")),
+            [
+                ConversationEvent("answer 2"),
+                UsageEvent(0),
+                TurnCompleteEvent(1),
+                LoopCompleteEvent("completed", 1),
+            ],
         )
         self.assertEqual(
             calls,
@@ -376,10 +406,10 @@ class AgentTest(unittest.TestCase):
                 calls.append((list(messages), tools))
                 if len(calls) == 1:
                     yield ToolCallEvent(ToolCall("call_1", "echo", {"text": "hello"}))
-                    yield DoneEvent()
+                    yield DoneEvent(2)
                     return
                 yield ConversationEvent("done")
-                yield DoneEvent()
+                yield DoneEvent(3)
 
         context = ContextManager()
         agent = Agent(FakeClient(), context, tool_manager)
@@ -388,42 +418,36 @@ class AgentTest(unittest.TestCase):
             list(agent.stream("use tool")),
             [
                 ToolCallEvent(ToolCall("call_1", "echo", {"text": "hello"})),
-                DoneEvent(),
+                ToolResultEvent("call_1", "echo", "hello"),
+                UsageEvent(2),
+                TurnCompleteEvent(1),
                 ConversationEvent("done"),
-                DoneEvent(),
+                UsageEvent(3),
+                TurnCompleteEvent(2),
+                LoopCompleteEvent("completed", 2),
             ],
         )
         self.assertEqual(
             context.messages(),
             [
                 Message("user", "use tool"),
-                Message("assistant", "", status="completed", token_usage=0),
+                Message("assistant", "", status="completed", token_usage=2),
                 Message.tool_call("call_1", "echo", {"text": "hello"}),
                 Message.tool_result("call_1", '{"content": "hello", "isError": false}'),
-                Message("assistant", "done", status="completed", token_usage=0),
+                Message("assistant", "done", status="completed", token_usage=3),
             ],
         )
         self.assertEqual(calls[0][1], tool_manager.schemas())
 
-    def test_stream_returns_tool_errors_to_the_model(self) -> None:
+    def test_stream_returns_unknown_tool_errors_to_the_model(self) -> None:
         calls = []
         tool_manager = ToolManager()
-
-        def fail() -> None:
-            raise ValueError("failed")
-
-        tool_manager.register(
-            "fail",
-            "Fail",
-            {"type": "object", "properties": {}},
-            fail,
-        )
 
         class FakeClient:
             def stream(self, messages, tools=None, reasoning=None):
                 calls.append(list(messages))
                 if len(calls) == 1:
-                    yield ToolCallEvent(ToolCall("call_1", "fail", {}))
+                    yield ToolCallEvent(ToolCall("call_1", "missing", {}))
                     yield DoneEvent()
                     return
                 yield ConversationEvent("recovered")
@@ -434,14 +458,23 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(
             list(Agent(FakeClient(), context, tool_manager).stream("use tool")),
             [
-                ToolCallEvent(ToolCall("call_1", "fail", {})),
-                DoneEvent(),
+                ToolCallEvent(ToolCall("call_1", "missing", {})),
+                ToolResultEvent(
+                    "call_1", "missing", "Unknown tool: missing", is_error=True
+                ),
+                UsageEvent(0),
+                TurnCompleteEvent(1),
                 ConversationEvent("recovered"),
-                DoneEvent(),
+                UsageEvent(0),
+                TurnCompleteEvent(2),
+                LoopCompleteEvent("completed", 2),
             ],
         )
         self.assertIn(
-            Message.tool_result("call_1", '{"content": "failed", "isError": true}'),
+            Message.tool_result(
+                "call_1",
+                '{"content": "Unknown tool: missing", "isError": true}',
+            ),
             calls[1],
         )
 
@@ -460,7 +493,9 @@ class AgentTest(unittest.TestCase):
             [
                 ConversationEvent("hel"),
                 ConversationEvent("lo"),
-                DoneEvent(token_usage=3),
+                UsageEvent(3),
+                TurnCompleteEvent(1),
+                LoopCompleteEvent("completed", 1),
             ],
         )
         self.assertEqual(
@@ -481,13 +516,119 @@ class AgentTest(unittest.TestCase):
         agent = Agent(FakeClient(), context)
 
         self.assertEqual(
-            list(agent.stream("hello")), [ConversationEvent("hel"), ErrorEvent("bad")]
+            list(agent.stream("hello")),
+            [
+                ConversationEvent("hel"),
+                ErrorEvent("bad"),
+                LoopCompleteEvent("error", 1),
+            ],
         )
         self.assertEqual(
             context.messages(),
             [
                 Message("user", "hello"),
                 Message("assistant", "hel", status="error", token_usage=0),
+            ],
+        )
+
+    def test_stream_stops_after_maximum_iterations(self) -> None:
+        calls = 0
+        tool_manager = ToolManager()
+        tool_manager.register(
+            "echo",
+            "Echo text",
+            {"type": "object", "properties": {}},
+            lambda: "ok",
+        )
+
+        class FakeClient:
+            def stream(self, messages, tools=None, reasoning=None):
+                nonlocal calls
+                calls += 1
+                yield ToolCallEvent(ToolCall(f"call_{calls}", "echo", {}))
+                yield DoneEvent(calls)
+
+        events = list(
+            Agent(
+                FakeClient(),
+                None,
+                tool_manager,
+                2,
+            ).stream("keep going")
+        )
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(events[-3], TurnCompleteEvent(2))
+        self.assertIsInstance(events[-2], ErrorEvent)
+        self.assertEqual(events[-2].code, "max_iterations")
+        self.assertEqual(events[-1], LoopCompleteEvent("max_iterations", 2))
+
+    def test_maximum_iterations_must_be_between_one_and_fifty(self) -> None:
+        class FakeClient:
+            def stream(self, messages, tools=None, reasoning=None):
+                return iter(())
+
+        self.assertEqual(getattr(Agent(FakeClient()), "max_iterations", None), 50)
+        for maximum in (0, 51):
+            with self.subTest(maximum=maximum):
+                with self.assertRaisesRegex(ValueError, "between 1 and 50"):
+                    Agent(FakeClient(), None, None, maximum)
+
+    def test_keyboard_interrupt_cancels_the_loop(self) -> None:
+        class FakeClient:
+            def stream(self, messages, tools=None, reasoning=None):
+                yield ConversationEvent("partial")
+                raise KeyboardInterrupt
+
+        context = ContextManager()
+
+        try:
+            events = list(Agent(FakeClient(), context).stream("hello"))
+        except KeyboardInterrupt:
+            events = None
+
+        self.assertEqual(
+            events,
+            [
+                ConversationEvent("partial"),
+                ErrorEvent("interrupted", "interrupted"),
+                LoopCompleteEvent("cancelled", 1),
+            ],
+        )
+        self.assertEqual(context.messages()[-1].status, "error")
+
+    def test_keyboard_interrupt_during_tool_does_not_leave_an_orphan_call(
+        self,
+    ) -> None:
+        tool_manager = ToolManager()
+        tool_manager.register(
+            "interrupt",
+            "Interrupt",
+            {"type": "object", "properties": {}},
+            lambda: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+
+        class FakeClient:
+            def stream(self, messages, tools=None, reasoning=None):
+                yield ToolCallEvent(ToolCall("call_1", "interrupt", {}))
+                yield DoneEvent()
+
+        context = ContextManager()
+        events = list(Agent(FakeClient(), context, tool_manager).stream("stop"))
+
+        self.assertEqual(
+            events,
+            [
+                ToolCallEvent(ToolCall("call_1", "interrupt", {})),
+                ErrorEvent("interrupted", "interrupted"),
+                LoopCompleteEvent("cancelled", 1),
+            ],
+        )
+        self.assertEqual(
+            context.messages(),
+            [
+                Message("user", "stop"),
+                Message("assistant", "", status="error"),
             ],
         )
 

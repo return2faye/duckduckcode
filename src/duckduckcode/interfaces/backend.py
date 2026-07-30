@@ -6,7 +6,15 @@ import sys
 from typing import TextIO
 
 from ..core.agent import Agent
-from ..core.event import ConversationEvent, DoneEvent, ErrorEvent, ToolCallEvent
+from ..core.event import (
+    ConversationEvent,
+    ErrorEvent,
+    LoopCompleteEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    TurnCompleteEvent,
+    UsageEvent,
+)
 
 
 def run_backend(
@@ -30,22 +38,19 @@ def run_backend(
                     output_stream.write(json.dumps(_event_to_json(event)) + "\n")
                     output_stream.flush()
             except KeyboardInterrupt:
-                output_stream.write(
-                    json.dumps(
-                        {
-                            "type": "error",
-                            "message": "interrupted",
-                            "code": "interrupted",
-                        }
-                    )
-                    + "\n"
-                )
-                output_stream.flush()
+                for event in (
+                    ErrorEvent("interrupted", "interrupted"),
+                    LoopCompleteEvent("cancelled", 0),
+                ):
+                    output_stream.write(json.dumps(_event_to_json(event)) + "\n")
+                    output_stream.flush()
             except Exception as exc:
-                output_stream.write(
-                    json.dumps({"type": "error", "message": str(exc)}) + "\n"
-                )
-                output_stream.flush()
+                for event in (
+                    ErrorEvent(str(exc), "error"),
+                    LoopCompleteEvent("error", 0),
+                ):
+                    output_stream.write(json.dumps(_event_to_json(event)) + "\n")
+                    output_stream.flush()
             finally:
                 active = False
     finally:
@@ -54,11 +59,32 @@ def run_backend(
 
 def _event_to_json(event: object) -> dict[str, object]:
     if isinstance(event, ConversationEvent):
-        return {"type": "delta", "text": event.delta}
-    if isinstance(event, DoneEvent):
-        return {"type": "done", "token_usage": event.token_usage}
+        return {"type": "stream_text", "delta": event.delta}
     if isinstance(event, ErrorEvent):
         return {"type": "error", "message": event.message, "code": event.code}
     if isinstance(event, ToolCallEvent):
-        return {"type": "tool", "name": event.tool_call.name}
+        return {
+            "type": "tool_use",
+            "call_id": event.tool_call.call_id,
+            "name": event.tool_call.name,
+            "arguments": event.tool_call.arguments,
+        }
+    if isinstance(event, ToolResultEvent):
+        return {
+            "type": "tool_result",
+            "call_id": event.call_id,
+            "name": event.name,
+            "content": event.content,
+            "is_error": event.is_error,
+        }
+    if isinstance(event, UsageEvent):
+        return {"type": "usage", "total_tokens": event.total_tokens}
+    if isinstance(event, TurnCompleteEvent):
+        return {"type": "turn_complete", "iteration": event.iteration}
+    if isinstance(event, LoopCompleteEvent):
+        return {
+            "type": "loop_complete",
+            "reason": event.reason,
+            "iterations": event.iterations,
+        }
     return {"type": "unknown"}

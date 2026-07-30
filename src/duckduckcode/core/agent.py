@@ -4,7 +4,17 @@ from collections.abc import Iterator
 
 from .client import Client
 from .context import ContextManager
-from .event import ConversationEvent, DoneEvent, ErrorEvent, StreamEvent, ToolCallEvent
+from .event import (
+    AgentEvent,
+    ConversationEvent,
+    DoneEvent,
+    ErrorEvent,
+    LoopCompleteEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    TurnCompleteEvent,
+    UsageEvent,
+)
 from ..tools.tool import ToolManager
 
 
@@ -14,52 +24,87 @@ class Agent:
         client: Client,
         context: ContextManager | None = None,
         tools: ToolManager | None = None,
-        max_tool_rounds: int = 8,
+        max_iterations: int = 50,
     ) -> None:
+        if (
+            isinstance(max_iterations, bool)
+            or not isinstance(max_iterations, int)
+            or not 1 <= max_iterations <= 50
+        ):
+            raise ValueError("max_iterations must be between 1 and 50")
         self.client = client
         self.context = context or ContextManager()
         self.tools = tools or ToolManager()
-        self.max_tool_rounds = max_tool_rounds
+        self.max_iterations = max_iterations
 
-    def stream(self, user_message: str) -> Iterator[StreamEvent]:
+    def stream(self, user_message: str) -> Iterator[AgentEvent]:
         self.context.add_user(user_message)
         self.context.set_tool_schemas(self.tools.schemas())
 
-        for _ in range(self.max_tool_rounds + 1):
+        for iteration in range(1, self.max_iterations + 1):
             messages = self.context.model_messages()
             assistant_index = self.context.start_assistant_stream()
             tool_called = False
             stream_finished = False
 
             try:
-                for event in self.client.stream(
-                    messages,
-                    tools=self.context.tool_schemas(),
-                    reasoning=self.context.reasoning,
-                ):
-                    if isinstance(event, ConversationEvent):
-                        self.context.append_assistant_delta(
-                            assistant_index, event.delta
-                        )
-                    elif isinstance(event, ToolCallEvent):
-                        tool_called = True
-                        self.context.add_tool_call(event.tool_call)
-                        self.context.add_tool_result(
-                            event.tool_call.call_id,
-                            self.tools.execute(event.tool_call).to_model_output(),
-                        )
-                    elif isinstance(event, DoneEvent):
-                        self.context.finish_assistant_stream(
-                            assistant_index, event.token_usage
-                        )
-                        stream_finished = True
-                    elif isinstance(event, ErrorEvent):
-                        self.context.fail_assistant_stream(assistant_index)
-                        stream_finished = True
-                    yield event
+                try:
+                    for event in self.client.stream(
+                        messages,
+                        tools=self.context.tool_schemas(),
+                        reasoning=self.context.reasoning,
+                    ):
+                        if isinstance(event, ConversationEvent):
+                            self.context.append_assistant_delta(
+                                assistant_index, event.delta
+                            )
+                            yield event
+                        elif isinstance(event, ToolCallEvent):
+                            tool_called = True
+                            yield event
+                            result = self.tools.execute(event.tool_call)
+                            self.context.add_tool_call(event.tool_call)
+                            self.context.add_tool_result(
+                                event.tool_call.call_id,
+                                result.to_model_output(),
+                            )
+                            yield ToolResultEvent(
+                                event.tool_call.call_id,
+                                event.tool_call.name,
+                                result.content,
+                                result.is_error,
+                            )
+                        elif isinstance(event, DoneEvent):
+                            self.context.finish_assistant_stream(
+                                assistant_index, event.token_usage
+                            )
+                            stream_finished = True
+                            yield UsageEvent(event.token_usage)
+                            yield TurnCompleteEvent(iteration)
+                            break
+                        elif isinstance(event, ErrorEvent):
+                            self.context.fail_assistant_stream(assistant_index)
+                            stream_finished = True
+                            yield event
+                            yield LoopCompleteEvent("error", iteration)
+                            return
+                except KeyboardInterrupt:
+                    self.context.fail_assistant_stream(assistant_index)
+                    stream_finished = True
+                    yield ErrorEvent("interrupted", "interrupted")
+                    yield LoopCompleteEvent("cancelled", iteration)
+                    return
             finally:
                 if not stream_finished:
                     self.context.fail_assistant_stream(assistant_index)
 
             if not tool_called:
-                break
+                yield LoopCompleteEvent("completed", iteration)
+                return
+            if iteration == self.max_iterations:
+                yield ErrorEvent(
+                    f"Agent stopped after {self.max_iterations} iterations.",
+                    "max_iterations",
+                )
+                yield LoopCompleteEvent("max_iterations", iteration)
+                return

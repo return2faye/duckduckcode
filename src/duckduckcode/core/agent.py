@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from pathlib import Path
+from typing import Literal
 
 from .client import Client
-from .context import ContextManager
+from .context import (
+    COMPACTION_OUTPUT_TOKENS,
+    CONTEXT_SAFETY_TOKENS,
+    ContextManager,
+    Message,
+)
 from .event import (
     AgentEvent,
     ConversationEvent,
+    ContextCompactionEvent,
     DoneEvent,
     ErrorEvent,
     LoopCompleteEvent,
@@ -20,10 +27,12 @@ from .event import (
     TurnCompleteEvent,
     UsageEvent,
 )
+from .prompts import COMPACTION_SYSTEM_PROMPT
 from ..permissions import PermissionChecker, PermissionMode
 from ..tools.tool import ToolCall, ToolManager, ToolResult
 
 AgentResponse = PermissionChoice | PlanReviewResponse | None
+COMPACTION_MAX_ATTEMPTS = 3
 
 
 class Agent:
@@ -48,6 +57,7 @@ class Agent:
         self.max_iterations = max_iterations
         self.permission_checker = permission_checker or PermissionChecker()
         self.plan_file = Path(plan_file).resolve() if plan_file is not None else None
+        self._compaction_circuit_open = False
 
     def enter_plan_mode(self, plan_file: str | Path | None = None) -> None:
         if plan_file is not None:
@@ -68,6 +78,11 @@ class Agent:
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self.permission_checker.set_permission_mode(mode)
 
+    def compact(self) -> Generator[AgentEvent, None, None]:
+        self._compaction_circuit_open = False
+        status = yield from self._compact(automatic=False)
+        yield LoopCompleteEvent("error" if status == "error" else "completed", 0)
+
     def stream(self, user_message: str) -> Generator[AgentEvent, AgentResponse, None]:
         self.permission_checker.start_task()
         try:
@@ -83,6 +98,16 @@ class Agent:
         plan_execution_failed = False
 
         for iteration in range(1, self.max_iterations + 1):
+            if self.context.should_compact():
+                yield from self._compact(automatic=True)
+            if self.context.estimated_tokens() >= self.context.context_window_tokens:
+                yield ErrorEvent(
+                    "Context is too large after compaction. Start a new conversation "
+                    "or shorten the current request.",
+                    "context_length",
+                )
+                yield LoopCompleteEvent("error", iteration)
+                return
             messages = self.context.model_messages()
             assistant_index = self.context.start_assistant_stream()
             tool_calls = []
@@ -202,6 +227,98 @@ class Agent:
                 yield LoopCompleteEvent("max_iterations", iteration)
                 return
 
+    def _compact(
+        self, automatic: bool
+    ) -> Generator[AgentEvent, None, Literal["completed", "skipped", "error"]]:
+        before_tokens = self.context.estimated_tokens()
+        if automatic and self._compaction_circuit_open:
+            return "skipped"
+        candidate = self.context.compaction_input()
+        if candidate is None:
+            if not automatic:
+                yield ContextCompactionEvent(
+                    "skipped",
+                    automatic,
+                    before_tokens,
+                    before_tokens,
+                )
+            return "skipped"
+
+        transcript, cutoff = candidate
+        messages = [
+            Message("system", COMPACTION_SYSTEM_PROMPT),
+            Message("user", transcript),
+        ]
+        input_tokens = self.context.estimate_request_tokens(messages)
+        max_output_tokens = min(
+            COMPACTION_OUTPUT_TOKENS,
+            self.context.context_window_tokens - input_tokens - CONTEXT_SAFETY_TOKENS,
+        )
+        if max_output_tokens < 1:
+            self._compaction_circuit_open = True
+            yield ErrorEvent(
+                "Context compaction cannot fit inside the configured context "
+                "window. Start a new conversation or increase "
+                "CONTEXT_WINDOW_TOKENS.",
+                "context_compaction",
+            )
+            return "error"
+
+        yield ContextCompactionEvent("started", automatic, before_tokens)
+        usage = 0
+        last_error: Exception | None = None
+        for _ in range(COMPACTION_MAX_ATTEMPTS):
+            output = ""
+            completed = False
+            attempt_usage = 0
+            try:
+                for event in self.client.stream(
+                    messages,
+                    tools=None,
+                    reasoning=self.context.reasoning,
+                    max_output_tokens=max_output_tokens,
+                ):
+                    if isinstance(event, ConversationEvent):
+                        output += event.delta
+                    elif isinstance(event, ToolCallEvent):
+                        raise RuntimeError("the model attempted to call a tool")
+                    elif isinstance(event, ErrorEvent):
+                        raise RuntimeError(event.message)
+                    elif isinstance(event, DoneEvent):
+                        attempt_usage = event.token_usage
+                        completed = True
+                        break
+                if not completed:
+                    raise RuntimeError("the model response did not complete")
+                self.context.apply_compaction(_extract_summary(output), cutoff)
+                usage += attempt_usage
+                self._compaction_circuit_open = False
+                break
+            except Exception as exc:
+                usage += attempt_usage
+                last_error = exc
+        else:
+            self._compaction_circuit_open = True
+            if usage:
+                yield UsageEvent(usage)
+            yield ErrorEvent(
+                "Context compaction failed after 3 attempts: "
+                f"{last_error}. Automatic compaction is disabled until "
+                "/compact is run.",
+                "context_compaction",
+            )
+            return "error"
+
+        if usage:
+            yield UsageEvent(usage)
+        yield ContextCompactionEvent(
+            "completed",
+            automatic,
+            before_tokens,
+            self.context.estimated_tokens(),
+        )
+        return "completed"
+
     def _execute_tools(self, tool_calls: list[ToolCall]) -> Generator[
         PermissionRequestEvent | PlanReviewEvent,
         AgentResponse,
@@ -287,3 +404,16 @@ class Agent:
             self.context.close()
         finally:
             self.permission_checker.close()
+
+
+def _extract_summary(output: str) -> str:
+    analysis_start = output.find("<analysis>")
+    analysis_end = output.find("</analysis>", analysis_start + len("<analysis>"))
+    summary_start = output.find("<summary>", analysis_end + len("</analysis>"))
+    summary_end = output.find("</summary>", summary_start + len("<summary>"))
+    if min(analysis_start, analysis_end, summary_start, summary_end) < 0:
+        raise RuntimeError("the model did not return analysis and summary sections")
+    summary = output[summary_start + len("<summary>") : summary_end].strip()
+    if not summary:
+        raise RuntimeError("the model returned an empty summary")
+    return summary

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 _COMMANDS = {
+    "/compact": "Compact conversation context",
     "/help": "Show available commands",
     "/permissions": "Choose a permission mode",
     "/plan": "Toggle Plan Mode",
@@ -21,6 +22,8 @@ def handle_slash_command(text: str) -> tuple[str, str] | None:
     if not text.startswith("/"):
         return None
     command = text.split(maxsplit=1)[0]
+    if command == "/compact":
+        return "compact", ""
     if command == "/plan":
         return "mode", "plan"
     if command == "/permissions":

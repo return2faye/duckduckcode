@@ -8,6 +8,7 @@ from typing import TextIO
 from ..core.agent import Agent
 from ..core.event import (
     ConversationEvent,
+    ContextCompactionEvent,
     ErrorEvent,
     LoopCompleteEvent,
     PermissionChoice,
@@ -48,6 +49,10 @@ def run_backend(
                     continue
                 if data.get("type") == "set_permission_mode":
                     agent.set_permission_mode(data.get("mode"))
+                    continue
+                if data.get("type") == "compact":
+                    active = True
+                    _run_compact(agent, output_stream)
                     continue
                 message = data["message"]
                 active = True
@@ -94,6 +99,16 @@ def _run_stream(
                 event = next(stream)
     except StopIteration:
         return
+    finally:
+        stream.close()
+
+
+def _run_compact(agent: Agent, output_stream: TextIO) -> None:
+    stream = agent.compact()
+    try:
+        for event in stream:
+            output_stream.write(json.dumps(_event_to_json(event)) + "\n")
+            output_stream.flush()
     finally:
         stream.close()
 
@@ -165,6 +180,14 @@ def _event_to_json(event: object) -> dict[str, object]:
         }
     if isinstance(event, UsageEvent):
         return {"type": "usage", "total_tokens": event.total_tokens}
+    if isinstance(event, ContextCompactionEvent):
+        return {
+            "type": "context_compaction",
+            "status": event.status,
+            "automatic": event.automatic,
+            "before_tokens": event.before_tokens,
+            "after_tokens": event.after_tokens,
+        }
     if isinstance(event, TurnCompleteEvent):
         return {"type": "turn_complete", "iteration": event.iteration}
     if isinstance(event, LoopCompleteEvent):

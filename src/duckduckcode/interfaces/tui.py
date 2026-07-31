@@ -18,6 +18,7 @@ from typing import Any
 from ..core.event import (
     AgentEvent,
     ConversationEvent,
+    ContextCompactionEvent,
     ErrorEvent,
     LoopCompleteEvent,
     PermissionChoice,
@@ -79,6 +80,16 @@ class PipeBackend:
 
     def stream(self, message: str) -> Iterator[AgentEvent]:
         self.process.stdin.write(json.dumps({"message": message}) + "\n")
+        self.process.stdin.flush()
+
+        for line in self.process.stdout:
+            event = _event_from_json(json.loads(line))
+            yield event
+            if isinstance(event, LoopCompleteEvent):
+                break
+
+    def compact(self) -> Iterator[AgentEvent]:
+        self.process.stdin.write(json.dumps({"type": "compact"}) + "\n")
         self.process.stdin.flush()
 
         for line in self.process.stdout:
@@ -188,6 +199,7 @@ class _Tui:
         self._waiting = False
         self._wait_frame = 0
         self._interrupting = False
+        self._compaction_active = False
         self._permission_request: PermissionRequestEvent | None = None
         self._permission_selection = len(PERMISSION_OPTIONS) - 1
         self._plan_review: PlanReviewEvent | None = None
@@ -331,6 +343,16 @@ class _Tui:
                     for index, (mode, _) in enumerate(PERMISSION_MODE_OPTIONS)
                     if mode == self.permission_mode
                 )
+            elif slash_command[0] == "compact":
+                self.messages.append(("duckduckcode", ""))
+                self._events = queue.Queue()
+                self._waiting = True
+                self._wait_frame = 0
+                threading.Thread(
+                    target=_read_compact,
+                    args=(self.backend, self._events),
+                    daemon=True,
+                ).start()
             else:
                 self.messages.append(slash_command)
             self.input = ""
@@ -362,6 +384,9 @@ class _Tui:
 
         for event in _ready_events(first, self._events):
             if event is None:
+                if self._compaction_active and self.messages:
+                    self.messages.pop()
+                    self._compaction_active = False
                 if self._waiting:
                     self.messages.pop()
                 self._events = None
@@ -411,6 +436,34 @@ class _Tui:
                 self.messages.append(("duckduckcode", "Plan completed"))
             elif isinstance(event, UsageEvent):
                 self.tokens += event.total_tokens
+            elif isinstance(event, ContextCompactionEvent):
+                if event.status == "started":
+                    self._compaction_active = True
+                    if self._waiting:
+                        self.messages[-1] = ("duckduckcode", "Compacting context…")
+                        self._waiting = False
+                    else:
+                        self.messages.append(("duckduckcode", "Compacting context…"))
+                elif event.status == "completed":
+                    self._compaction_active = False
+                    label = (
+                        "Context compacted automatically"
+                        if event.automatic
+                        else "Context compacted"
+                    )
+                    self.messages[-1] = (
+                        "duckduckcode",
+                        f"{label} ({event.before_tokens:,} → {event.after_tokens:,} tokens).",
+                    )
+                    self.messages.append(("duckduckcode", ""))
+                    self._waiting = True
+                elif event.status == "skipped":
+                    self._compaction_active = False
+                    self.messages[-1] = (
+                        "duckduckcode",
+                        "Nothing to compact; recent conversation was kept intact.",
+                    )
+                    self._waiting = False
             elif isinstance(event, TurnCompleteEvent):
                 if not self._waiting:
                     self.messages.append(("duckduckcode", ""))
@@ -423,7 +476,11 @@ class _Tui:
                 self._permission_request = None
                 self._plan_review = None
             elif isinstance(event, ErrorEvent):
-                if self._waiting:
+                if self._compaction_active:
+                    if self.messages:
+                        self.messages.pop()
+                    self._compaction_active = False
+                elif self._waiting:
                     self.messages.pop()
                 self._waiting = False
                 self._permission_request = None
@@ -1240,6 +1297,13 @@ def _event_from_json(data: dict[str, Any]) -> AgentEvent:
         )
     if event_type == "usage":
         return UsageEvent(int(data.get("total_tokens", 0)))
+    if event_type == "context_compaction":
+        return ContextCompactionEvent(
+            data.get("status", "skipped"),
+            bool(data.get("automatic", False)),
+            int(data.get("before_tokens", 0)),
+            int(data.get("after_tokens", 0)),
+        )
     if event_type == "turn_complete":
         return TurnCompleteEvent(int(data.get("iteration", 0)))
     if event_type == "loop_complete":
@@ -1257,6 +1321,16 @@ def _read_stream(
 ) -> None:
     try:
         for event in backend.stream(prompt):
+            events.put(event)
+    except Exception as exc:
+        events.put(ErrorEvent(str(exc)))
+    finally:
+        events.put(None)
+
+
+def _read_compact(backend: PipeBackend, events: queue.Queue[AgentEvent | None]) -> None:
+    try:
+        for event in backend.compact():
             events.put(event)
     except Exception as exc:
         events.put(ErrorEvent(str(exc)))

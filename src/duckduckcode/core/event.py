@@ -83,6 +83,14 @@ class UsageEvent:
     total_tokens: int
 
 
+@dataclass(frozen=True)
+class ContextCompactionEvent:
+    status: Literal["started", "completed", "skipped"]
+    automatic: bool
+    before_tokens: int
+    after_tokens: int = 0
+
+
 StreamEvent = ConversationEvent | ToolCallEvent | ErrorEvent | DoneEvent
 AgentEvent = (
     ConversationEvent
@@ -93,5 +101,6 @@ AgentEvent = (
     | TurnCompleteEvent
     | LoopCompleteEvent
     | UsageEvent
+    | ContextCompactionEvent
     | ErrorEvent
 )

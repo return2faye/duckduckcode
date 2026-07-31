@@ -40,6 +40,7 @@ class OpenAIClient(Client):
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
         reasoning: ReasoningConfig | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[StreamEvent]:
         payload = self.serializer.serialize(
             messages,
@@ -47,6 +48,8 @@ class OpenAIClient(Client):
         )
         if tools:
             payload["tools"] = tools
+        if max_output_tokens is not None:
+            payload["max_output_tokens"] = max_output_tokens
         events = self._client.responses.create(
             model=self.model,
             stream=True,

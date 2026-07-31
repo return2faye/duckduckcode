@@ -178,13 +178,16 @@ class OpenAIStreamTest(unittest.TestCase):
         self.assertEqual(
             list(
                 client.stream(
-                    [Message("user", "hello")], reasoning=ReasoningConfig("low")
+                    [Message("user", "hello")],
+                    reasoning=ReasoningConfig("low"),
+                    max_output_tokens=20_000,
                 )
             ),
             [ConversationEvent("hi")],
         )
         self.assertTrue(fake_responses.kwargs["stream"])
         self.assertEqual(fake_responses.kwargs["reasoning"], {"effort": "low"})
+        self.assertEqual(fake_responses.kwargs["max_output_tokens"], 20_000)
 
 
 if __name__ == "__main__":

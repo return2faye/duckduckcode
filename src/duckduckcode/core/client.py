@@ -28,5 +28,6 @@ class Client(ABC):
         messages: list[Message],
         tools: list[dict[str, Any]] | None = None,
         reasoning: ReasoningConfig | None = None,
+        max_output_tokens: int | None = None,
     ) -> Iterator[StreamEvent]:
         raise NotImplementedError

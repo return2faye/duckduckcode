@@ -6,6 +6,7 @@ import unittest
 
 from duckduckcode.core.event import (
     ConversationEvent,
+    ContextCompactionEvent,
     LoopCompleteEvent,
     PermissionRequestEvent,
     PlanReviewEvent,
@@ -20,6 +21,45 @@ from duckduckcode.tools.tool import ToolCall
 
 
 class BackendTest(unittest.TestCase):
+    def test_backend_runs_manual_context_compaction(self) -> None:
+        class FakeAgent:
+            def compact(self):
+                yield ContextCompactionEvent("started", False, 170_000)
+                yield ContextCompactionEvent("completed", False, 170_000, 40_000)
+                yield LoopCompleteEvent("completed", 0)
+
+        output = io.StringIO()
+        run_backend(
+            FakeAgent(),
+            input_stream=io.StringIO('{"type": "compact"}\n'),
+            output_stream=output,
+        )
+
+        self.assertEqual(
+            [json.loads(line) for line in output.getvalue().splitlines()],
+            [
+                {
+                    "type": "context_compaction",
+                    "status": "started",
+                    "automatic": False,
+                    "before_tokens": 170_000,
+                    "after_tokens": 0,
+                },
+                {
+                    "type": "context_compaction",
+                    "status": "completed",
+                    "automatic": False,
+                    "before_tokens": 170_000,
+                    "after_tokens": 40_000,
+                },
+                {
+                    "type": "loop_complete",
+                    "reason": "completed",
+                    "iterations": 0,
+                },
+            ],
+        )
+
     def test_backend_switches_modes_without_sending_commands_to_model(self) -> None:
         calls = []
 

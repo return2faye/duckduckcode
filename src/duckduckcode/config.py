@@ -14,6 +14,7 @@ class Config:
     openai_api_key: str
     openai_model: str = "o4-mini"
     reasoning: ReasoningConfig = ReasoningConfig()
+    context_window_tokens: int = 200_000
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -25,8 +26,16 @@ class Config:
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required")
 
+        try:
+            context_window_tokens = int(env.get("CONTEXT_WINDOW_TOKENS", "200000"))
+        except ValueError as exc:
+            raise RuntimeError("CONTEXT_WINDOW_TOKENS must be an integer") from exc
+        if context_window_tokens <= 33_000:
+            raise RuntimeError("CONTEXT_WINDOW_TOKENS must be greater than 33000")
+
         return cls(
             openai_api_key=api_key,
             openai_model=env.get("OPENAI_MODEL", "o4-mini"),
             reasoning=ReasoningConfig(env.get("OPENAI_REASONING_EFFORT", "low")),
+            context_window_tokens=context_window_tokens,
         )

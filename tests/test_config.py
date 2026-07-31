@@ -13,6 +13,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.openai_api_key, "key")
         self.assertEqual(config.openai_model, "o4-mini")
         self.assertEqual(config.reasoning, ReasoningConfig("low"))
+        self.assertEqual(config.context_window_tokens, 200_000)
 
     def test_environment_overrides_defaults(self) -> None:
         config = Config.from_env(
@@ -20,11 +21,24 @@ class ConfigTest(unittest.TestCase):
                 "OPENAI_API_KEY": "key",
                 "OPENAI_MODEL": "test-model",
                 "OPENAI_REASONING_EFFORT": "medium",
+                "CONTEXT_WINDOW_TOKENS": "180000",
             }
         )
 
         self.assertEqual(config.openai_model, "test-model")
         self.assertEqual(config.reasoning, ReasoningConfig("medium"))
+        self.assertEqual(config.context_window_tokens, 180_000)
+
+    def test_rejects_invalid_context_window(self) -> None:
+        for value in ("large", "33000"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "CONTEXT_WINDOW_TOKENS"):
+                    Config.from_env(
+                        {
+                            "OPENAI_API_KEY": "key",
+                            "CONTEXT_WINDOW_TOKENS": value,
+                        }
+                    )
 
     def test_requires_openai_api_key(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "OPENAI_API_KEY"):

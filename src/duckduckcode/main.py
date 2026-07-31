@@ -92,6 +92,7 @@ def build_agent(config: Config, workspace: Path) -> Agent:
                 ),
                 reasoning=config.reasoning,
                 tool_result_directory=path_sandbox.tool_result_directory,
+                context_window_tokens=config.context_window_tokens,
             ),
             tools,
             permission_checker=PermissionChecker(

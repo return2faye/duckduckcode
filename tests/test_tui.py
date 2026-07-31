@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from duckduckcode.core.event import (
     ConversationEvent,
+    ContextCompactionEvent,
     ErrorEvent,
     LoopCompleteEvent,
     PermissionRequestEvent,
@@ -135,6 +136,30 @@ class TuiTest(unittest.TestCase):
         )
         process.stdin.seek(0)
         self.assertEqual(json.loads(process.stdin.read()), {"message": "hello"})
+
+    def test_pipe_backend_requests_context_compaction(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO(
+                    '{"type": "context_compaction", "status": "completed", '
+                    '"automatic": false, "before_tokens": 170000, '
+                    '"after_tokens": 40000}\n'
+                    '{"type": "loop_complete", "reason": "completed", '
+                    '"iterations": 0}\n'
+                )
+
+        process = FakeProcess()
+
+        self.assertEqual(
+            list(PipeBackend(process).compact()),
+            [
+                ContextCompactionEvent("completed", False, 170_000, 40_000),
+                LoopCompleteEvent("completed", 0),
+            ],
+        )
+        process.stdin.seek(0)
+        self.assertEqual(json.loads(process.stdin.read()), {"type": "compact"})
 
     def test_pipe_backend_writes_permission_response(self) -> None:
         class FakeProcess:
@@ -353,6 +378,7 @@ class TuiTest(unittest.TestCase):
                 (
                     "duckduckcode",
                     "Available slash commands:\n"
+                    "/compact  Compact conversation context\n"
                     "/help  Show available commands\n"
                     "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode",
@@ -394,8 +420,16 @@ class TuiTest(unittest.TestCase):
                 ("/plan", "Toggle Plan Mode"),
             ],
         )
+        self.assertEqual(
+            suggestions("/c"),
+            [("/compact", "Compact conversation context")],
+        )
         self.assertEqual(suggestions("/missing"), [])
         self.assertIsNone(suggestions("hello"))
+        self.assertEqual(
+            slash_command_module.handle_slash_command("/compact"),
+            ("compact", ""),
+        )
 
     def test_plan_slash_command_switches_backend_without_calling_model(self) -> None:
         class FakeBackend:
@@ -540,6 +574,7 @@ class TuiTest(unittest.TestCase):
                 (
                     "duckduckcode",
                     "Available slash commands:\n"
+                    "/compact  Compact conversation context\n"
                     "/help  Show available commands\n"
                     "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode",
@@ -805,6 +840,49 @@ class TuiTest(unittest.TestCase):
             ("tool:call_1", "✓ ReadFile completed\ncontents"),
         )
         self.assertEqual(tui.tokens, 6)
+        self.assertIsNone(tui._events)
+
+    def test_consume_events_displays_context_compaction_status(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        tui.messages = [("duckduckcode", "")]
+        tui._waiting = True
+        tui._events = queue.Queue()
+        for event in (
+            ContextCompactionEvent("started", False, 170_000),
+            ContextCompactionEvent("completed", False, 170_000, 40_000),
+            LoopCompleteEvent("completed", 0),
+            None,
+        ):
+            tui._events.put(event)
+
+        tui._consume_events()
+
+        self.assertEqual(
+            tui.messages,
+            [("duckduckcode", "Context compacted (170,000 → 40,000 tokens).")],
+        )
+        self.assertIsNone(tui._events)
+
+    def test_consume_events_clears_failed_context_compaction_status(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        tui.messages = [("duckduckcode", "")]
+        tui._waiting = True
+        tui._events = queue.Queue()
+        for event in (
+            ContextCompactionEvent("started", False, 170_000),
+            ErrorEvent("Context compaction failed after 3 attempts"),
+            LoopCompleteEvent("error", 0),
+            None,
+        ):
+            tui._events.put(event)
+
+        tui._consume_events()
+
+        self.assertEqual(
+            tui.messages,
+            [("error", "Context compaction failed after 3 attempts")],
+        )
+        self.assertFalse(tui._compaction_active)
         self.assertIsNone(tui._events)
 
     def test_permission_dialog_uses_arrows_enter_and_escape(self) -> None:

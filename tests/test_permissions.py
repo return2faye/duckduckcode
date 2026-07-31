@@ -279,6 +279,15 @@ class PermissionCheckerTest(unittest.TestCase):
             ),
             (
                 ToolCall(
+                    "network",
+                    "Bash",
+                    {"command": "git status --short", "network_access": True},
+                ),
+                bash,
+                "deny",
+            ),
+            (
+                ToolCall(
                     "no-pager",
                     "Bash",
                     {"command": "git --no-pager diff --stat"},

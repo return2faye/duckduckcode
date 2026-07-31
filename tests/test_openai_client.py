@@ -260,6 +260,7 @@ class ContextManagerTest(unittest.TestCase):
         self.assertIn("Behavior guidelines:", prompt)
         self.assertIn("Tool use:", prompt)
         self.assertIn("Bug fixes:", prompt)
+        self.assertIn("Troubleshooting notebook:", prompt)
         self.assertIn("Security and safety:", prompt)
         self.assertIn("Use absolute file paths when calling file tools.", prompt)
         self.assertIn(
@@ -281,6 +282,8 @@ class ContextManagerTest(unittest.TestCase):
         self.assertIn("OS: TestOS", prompt)
         self.assertIn("Model: test-model", prompt)
         self.assertIn("Working directory: /repo", prompt)
+        self.assertIn("Troubleshooting notebook: /repo/docs/错题本.md", prompt)
+        self.assertIn("append a concise Chinese entry", prompt)
         self.assertIn("Mode: test-only", prompt)
         self.assertEqual(
             buildSystemPrompt("/repo", "TestOS", "Mode: test-only", "test-model"),

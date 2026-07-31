@@ -139,6 +139,8 @@ def _is_plan_safe(tool_call: ToolCall, tool: Tool, plan_file: Path) -> bool:
         return candidate.resolve() == plan_file.resolve()
     if tool_call.name != "Bash":
         return False
+    if tool_call.arguments.get("network_access", False) is not False:
+        return False
     command = tool_call.arguments.get("command")
     if not isinstance(command, str) or any(
         token in command for token in ("\n", ";", "&", "|", ">", "<", "`", "$(")

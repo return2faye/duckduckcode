@@ -9,6 +9,7 @@ import subprocess
 import time
 from typing import Any
 
+from .os_sandbox import OSSandbox
 from .tool import Tool, ToolResult, create_tool
 
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -37,19 +38,35 @@ BASH_PARAMS = {
                 "and print its PID."
             ),
         },
+        "network_access": {
+            "type": "boolean",
+            "description": (
+                "Set true only when this command must access the network, such as "
+                "downloading dependencies. In sandboxed permission modes, network "
+                "access requires separate approval."
+            ),
+        },
     },
-    "required": ["command"],
+    "required": ["command", "network_access"],
     "additionalProperties": False,
 }
 
 
-def create_bash_tool(working_directory: Path | None = None) -> Tool:
+def create_bash_tool(
+    working_directory: Path | None = None,
+    sandbox: OSSandbox | None = None,
+) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
     return create_tool(
         "Bash",
-        "Use Bash only when no dedicated tool fits, such as running tests, package commands, git commands, starting development servers, or inspecting non-text files. Commands execute through the system shell from the working directory. The timeout of 120 seconds applies to the foreground shell process, not a properly detached service. For a long-running service, start it in the background with stdin redirected and stdout/stderr written to a log file, print its PID, then use a follow-up Bash call to check its health. Results are JSON with merged stdout/stderr in output and the numeric exit_code; output beyond 200,000 bytes is truncated. This tool can modify files or external state, so avoid destructive commands unless the user explicitly confirms them.",
+        "Use Bash only when no dedicated tool fits, such as running tests, package commands, git commands, starting development servers, or inspecting non-text files. Commands execute through the system shell from the working directory. In sandboxed permission modes, network access is disabled unless network_access is true and separately approved. The timeout of 120 seconds applies to the foreground shell process, not a properly detached service. For a long-running service, start it in the background with stdin redirected and stdout/stderr written to a log file, print its PID, then use a follow-up Bash call to check its health. Results are JSON with merged stdout/stderr in output and the numeric exit_code; output beyond 200,000 bytes is truncated. This tool can modify files or external state, so avoid destructive commands unless the user explicitly confirms them.",
         BASH_PARAMS,
-        lambda command: _run_bash(base_directory, command),
+        lambda command, network_access: _run_bash(
+            base_directory,
+            command,
+            sandbox=sandbox,
+            network_access=network_access,
+        ),
         _validate_arguments,
         is_dangerous=True,
         category="shell",
@@ -57,12 +74,12 @@ def create_bash_tool(working_directory: Path | None = None) -> Tool:
 
 
 def _validate_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
-    unsupported = sorted(arguments.keys() - {"command"})
+    unsupported = sorted(arguments.keys() - {"command", "network_access"})
     if unsupported:
         names = ", ".join(unsupported)
         raise ValueError(
             f"Bash failed: unsupported parameter(s): {names}. "
-            "Remove them and use only command."
+            "Remove them and use only command and network_access."
         )
 
     if "command" not in arguments:
@@ -76,23 +93,40 @@ def _validate_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "Bash failed: 'command' cannot be empty. Provide a shell command."
         )
-    return {"command": command}
+    network_access = arguments.get("network_access", False)
+    if not isinstance(network_access, bool):
+        raise ValueError("Bash failed: 'network_access' must be a boolean.")
+    return {"command": command, "network_access": network_access}
 
 
 def _run_bash(
     working_directory: Path,
     command: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    sandbox: OSSandbox | None = None,
+    network_access: bool = False,
 ) -> ToolResult:
-    process = subprocess.Popen(
-        command,
-        cwd=working_directory,
-        shell=True,
-        stderr=subprocess.STDOUT,
-        stdout=subprocess.PIPE,
-        bufsize=0,
-        start_new_session=os.name != "nt",
-    )
+    prepared = sandbox.prepare(command, network_access) if sandbox is not None else None
+    try:
+        process = subprocess.Popen(
+            prepared.argv if prepared is not None else command,
+            cwd=working_directory,
+            shell=prepared is None,
+            stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE,
+            bufsize=0,
+            start_new_session=os.name != "nt",
+            pass_fds=prepared.pass_fds if prepared is not None else (),
+            env=(
+                {**os.environ, **(prepared.environment or {})}
+                if prepared is not None
+                else None
+            ),
+        )
+    finally:
+        if prepared is not None:
+            prepared.close()
     stdout = process.stdout
     captured = bytearray()
     truncated = False

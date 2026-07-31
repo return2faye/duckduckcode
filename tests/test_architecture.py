@@ -34,6 +34,7 @@ EXPECTED_MODULES = {
     "tools/edit_file.py",
     "tools/glob.py",
     "tools/grep.py",
+    "tools/os_sandbox.py",
     "tools/read_file.py",
     "tools/tool.py",
     "tools/write_file.py",

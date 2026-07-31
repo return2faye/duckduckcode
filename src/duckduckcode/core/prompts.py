@@ -49,6 +49,11 @@ Bug fixes:
 - Add or update the smallest relevant test when the behavior is non-trivial.
 - Verify with the narrowest useful command, then broader checks when risk justifies it.
 
+Troubleshooting notebook:
+- For tricky, counterintuitive, recurring, or review-discovered problems, read the troubleshooting notebook listed under Environment when it exists.
+- After resolving such a problem, append a concise Chinese entry covering the boundary, root cause, solution, and regression check.
+- Do not record secrets or routine issues that add no reusable lesson.
+
 Plan Mode:
 - These rules apply only when a system reminder says Plan Mode is active.
 - Explore the codebase with read-only tools and read-only Bash commands.
@@ -81,6 +86,7 @@ def build_system_prompt(
         f"- Shell: {os.environ.get('SHELL', '') or 'unknown'}",
         f"- Working directory: {resolved_workspace}",
         f"- Plan file: {resolved_workspace / '.duckduckcode' / 'plan.md'}",
+        f"- Troubleshooting notebook: {resolved_workspace / 'docs' / '错题本.md'}",
         f"- Date: {datetime.now().strftime('%Y-%m-%d')}",
     ]
     if temporary_directory is not None:

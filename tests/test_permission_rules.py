@@ -429,6 +429,92 @@ Bash:
                 [{"content": "git status", "action": "allow"}],
             )
 
+    def test_network_bash_approval_is_separate_from_normal_bash(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as home_directory,
+            tempfile.TemporaryDirectory() as workspace_directory,
+            tempfile.TemporaryDirectory() as temporary_directory,
+        ):
+            workspace = Path(workspace_directory)
+            policy = RulePolicy.load(
+                workspace,
+                Path(temporary_directory),
+                TOOLS,
+                home=Path(home_directory),
+            )
+            normal = ToolCall("normal", "Bash", {"command": "uv sync"})
+            network = ToolCall(
+                "network",
+                "Bash",
+                {"command": "uv sync", "network_access": True},
+            )
+
+            policy.remember_allow(normal)
+            self.assertEqual(policy.check(normal).action, "allow")
+            self.assertEqual(policy.check(network).action, "ask")
+
+            policy.remember_allow(network)
+            self.assertEqual(policy.check(network).action, "allow")
+            rules = yaml.safe_load(
+                (workspace / ".duckduckcode" / "permissions.local.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                rules["Bash"],
+                [
+                    {"content": "uv sync", "action": "allow"},
+                    {"content": "network:uv sync", "action": "allow"},
+                ],
+            )
+
+    def test_network_flag_cannot_bypass_bash_rules(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as home_directory,
+            tempfile.TemporaryDirectory() as workspace_directory,
+            tempfile.TemporaryDirectory() as temporary_directory,
+        ):
+            workspace = Path(workspace_directory)
+            permission_directory = workspace / ".duckduckcode"
+            permission_directory.mkdir()
+            (permission_directory / "permissions.yaml").write_text(
+                """
+Bash:
+  - content: "*"
+    action: allow
+  - content: "uv *"
+    action: deny
+""",
+                encoding="utf-8",
+            )
+            policy = RulePolicy.load(
+                workspace,
+                Path(temporary_directory),
+                TOOLS,
+                home=Path(home_directory),
+            )
+
+            self.assertEqual(
+                policy.check(
+                    ToolCall(
+                        "denied",
+                        "Bash",
+                        {"command": "uv sync", "network_access": True},
+                    )
+                ).action,
+                "deny",
+            )
+            self.assertEqual(
+                policy.check(
+                    ToolCall(
+                        "separate",
+                        "Bash",
+                        {"command": "npm install", "network_access": True},
+                    )
+                ).action,
+                "ask",
+            )
+
     def test_rejects_legacy_action_first_rules(self) -> None:
         with (
             tempfile.TemporaryDirectory() as home_directory,

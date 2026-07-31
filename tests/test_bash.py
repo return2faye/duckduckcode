@@ -63,8 +63,16 @@ class BashTest(unittest.TestCase):
                             "and print its PID."
                         ),
                     },
+                    "network_access": {
+                        "type": "boolean",
+                        "description": (
+                            "Set true only when this command must access the network, "
+                            "such as downloading dependencies. In sandboxed permission "
+                            "modes, network access requires separate approval."
+                        ),
+                    },
                 },
-                "required": ["command"],
+                "required": ["command", "network_access"],
                 "additionalProperties": False,
             },
         )
@@ -259,6 +267,10 @@ class BashTest(unittest.TestCase):
             ({}, "'command' is required"),
             ({"command": 1}, "'command' must be a string"),
             ({"command": ""}, "'command' cannot be empty"),
+            (
+                {"command": "pwd", "network_access": "yes"},
+                "'network_access' must be a boolean",
+            ),
             ({"command": "pwd", "extra": True}, "unsupported parameter"),
         ]
 
@@ -267,6 +279,29 @@ class BashTest(unittest.TestCase):
                 result = self.execute(**arguments)
                 self.assertTrue(result.is_error)
                 self.assertIn(message, result.content)
+
+    def test_passes_explicit_network_request_to_the_os_sandbox(self) -> None:
+        class FakeSandbox:
+            calls = []
+
+            def prepare(self, command, network_access):
+                self.calls.append((command, network_access))
+                return None
+
+        sandbox = FakeSandbox()
+        manager = ToolManager()
+        manager.register(create_bash_tool(self.root, sandbox))
+
+        result = manager.execute(
+            ToolCall(
+                "network",
+                "Bash",
+                {"command": "printf ready", "network_access": True},
+            )
+        )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(sandbox.calls, [("printf ready", True)])
 
 
 if __name__ == "__main__":

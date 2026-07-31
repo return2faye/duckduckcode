@@ -40,6 +40,7 @@ class _Rule:
     pattern: str
     text: str
     local: bool
+    network: bool = False
 
 
 class RulePolicy:
@@ -143,44 +144,64 @@ class RulePolicy:
         content = self._content(tool_call)
         if content is None:
             return PermissionDecision("unspecified")
-        matches = [
+        network_access = (
+            tool_call.name == "Bash"
+            and tool_call.arguments.get("network_access", False) is True
+        )
+        display_content = f"network:{content}" if network_access else content
+        base_matches = [
             rule
             for rule in self.rules
-            if rule.tool_name == tool_call.name and _matches(rule, content)
+            if rule.tool_name == tool_call.name
+            and not rule.network
+            and _matches(rule, content)
         ]
+        scopes = [base_matches]
+        if network_access:
+            scopes.append(
+                [
+                    rule
+                    for rule in self.rules
+                    if rule.tool_name == "Bash"
+                    and rule.network
+                    and _matches(rule, content)
+                ]
+            )
+        matches = [rule for scope in scopes for rule in scope]
         denied = next((rule for rule in matches if rule.action == "deny"), None)
         if denied is not None:
             return PermissionDecision(
                 "deny",
                 f"Permission denied by rule '{denied.text}'.",
-                content,
+                display_content,
             )
-        exact_local_allow = next(
-            (
-                rule
-                for rule in matches
-                if rule.action == "allow"
-                and rule.local
-                and rule.pattern == glob.escape(content)
-            ),
-            None,
-        )
-        if exact_local_allow is not None:
-            return PermissionDecision("allow", content=content)
-        asked = next((rule for rule in matches if rule.action == "ask"), None)
-        if asked is not None:
-            return PermissionDecision(
-                "ask",
-                f"Permission approval required by rule '{asked.text}'.",
-                content,
+        for scope in scopes:
+            exact_local_allow = next(
+                (
+                    rule
+                    for rule in scope
+                    if rule.action == "allow"
+                    and rule.local
+                    and rule.pattern == glob.escape(content)
+                ),
+                None,
             )
-        if any(rule.action == "allow" for rule in matches):
-            return PermissionDecision("allow", content=content)
-        return PermissionDecision(
-            "ask",
-            "Permission approval required: no permission rule matched.",
-            content,
-        )
+            if exact_local_allow is not None:
+                continue
+            asked = next((rule for rule in scope if rule.action == "ask"), None)
+            if asked is not None:
+                return PermissionDecision(
+                    "ask",
+                    f"Permission approval required by rule '{asked.text}'.",
+                    display_content,
+                )
+            if not any(rule.action == "allow" for rule in scope):
+                return PermissionDecision(
+                    "ask",
+                    "Permission approval required: no permission rule matched.",
+                    display_content,
+                )
+        return PermissionDecision("allow", content=display_content)
 
     def remember_allow(self, tool_call: ToolCall) -> None:
         content = self._content(tool_call)
@@ -189,27 +210,40 @@ class RulePolicy:
                 f"Cannot remember permission for malformed {tool_call.name} input."
             )
         pattern = self._stored_pattern(tool_call.name, content)
+        patterns = [pattern]
+        if (
+            tool_call.name == "Bash"
+            and tool_call.arguments.get("network_access", False) is True
+        ):
+            patterns.append(f"network:{pattern}")
         local_data = {
             name: [dict(entry) for entry in entries]
             for name, entries in self._local_data.items()
         }
-        entry = {"content": pattern, "action": "allow"}
         tool_rules = local_data.setdefault(tool_call.name, [])
-        if entry in tool_rules:
+        new_patterns = [
+            candidate
+            for candidate in patterns
+            if {"content": candidate, "action": "allow"} not in tool_rules
+        ]
+        if not new_patterns:
             return
-        tool_rules.append(entry)
+        tool_rules.extend(
+            {"content": candidate, "action": "allow"} for candidate in new_patterns
+        )
         self._write_local(local_data, self.permission_mode)
         self._local_data = local_data
-        self.rules.append(
+        self.rules.extend(
             _build_rule(
                 "allow",
                 tool_call.name,
-                pattern,
+                candidate,
                 self.local_file,
                 True,
                 self.workspace,
                 self.temporary_directory,
             )
+            for candidate in new_patterns
         )
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
@@ -251,7 +285,10 @@ class RulePolicy:
     def _content(self, tool_call: ToolCall) -> str | None:
         if tool_call.name == "Bash":
             command = tool_call.arguments.get("command")
-            return command if isinstance(command, str) else None
+            network_access = tool_call.arguments.get("network_access", False)
+            if not isinstance(command, str) or not isinstance(network_access, bool):
+                return None
+            return command
         if tool_call.name not in _PATH_TOOLS:
             return None
         path = tool_call.arguments.get("path")
@@ -438,6 +475,9 @@ def _build_rule(
     temporary_directory: Path,
 ) -> _Rule:
     text = f"{tool_name}({pattern})"
+    network = tool_name == "Bash" and pattern.startswith("network:")
+    if network:
+        pattern = pattern.removeprefix("network:")
     if tool_name in _PATH_TOOLS:
         if pattern.startswith("./"):
             pattern = (workspace / pattern[2:]).as_posix()
@@ -449,7 +489,7 @@ def _build_rule(
             ).as_posix()
         else:
             pattern = pattern.replace("\\", "/")
-    return _Rule(action, tool_name, pattern, text, local)
+    return _Rule(action, tool_name, pattern, text, local, network)
 
 
 def _matches(rule: _Rule, content: str) -> bool:

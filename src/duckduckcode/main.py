@@ -24,6 +24,7 @@ from .tools import (
     create_read_file_tool,
     create_write_file_tool,
 )
+from .tools.os_sandbox import OSSandbox
 from .tools.tool import ToolManager, create_exit_plan_mode_tool
 
 
@@ -57,13 +58,19 @@ def main() -> None:
 def build_agent(config: Config, workspace: Path) -> Agent:
     path_sandbox = PathSandbox(workspace)
     try:
+        policy: RulePolicy | None = None
+        os_sandbox = OSSandbox(
+            workspace,
+            path_sandbox.temporary_directory,
+            lambda: policy is not None and policy.permission_mode != "full_access",
+        )
         tools = ToolManager()
         tools.register(create_read_file_tool(workspace))
         tools.register(create_write_file_tool(workspace))
         tools.register(create_edit_file_tool(workspace))
         tools.register(create_glob_tool(workspace, path_sandbox.allowed_directories))
         tools.register(create_grep_tool(workspace, path_sandbox.allowed_directories))
-        tools.register(create_bash_tool(workspace))
+        tools.register(create_bash_tool(workspace, os_sandbox))
         tools.register(create_exit_plan_mode_tool())
         policy = RulePolicy.load(
             workspace,

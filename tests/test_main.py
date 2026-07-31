@@ -84,12 +84,31 @@ class MainTest(unittest.TestCase):
 
             self.assertFalse(temporary_directory.exists())
 
+    def test_full_access_disables_the_os_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            sandbox = Mock()
+            with (
+                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+                patch("duckduckcode.main.OSSandbox", return_value=sandbox) as factory,
+            ):
+                agent = build_agent(Config("test-key"), workspace)
+            self.addCleanup(agent.close)
+            enabled = factory.call_args.args[2]
+
+            self.assertTrue(enabled())
+            agent.set_permission_mode("full_access")
+            self.assertFalse(enabled())
+
     def test_build_agent_injects_one_workspace_into_all_file_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             source = workspace / "source.txt"
             source.write_text("old", encoding="utf-8")
-            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+            with (
+                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+                patch("duckduckcode.main.OSSandbox", return_value=None),
+            ):
                 agent = build_agent(Config("test-key"), workspace)
             self.addCleanup(agent.close)
 

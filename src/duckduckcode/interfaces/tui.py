@@ -55,6 +55,14 @@ PLAN_REVIEW_OPTIONS = (
     ("deny", "拒绝计划"),
     ("feedback", "输入修改意见"),
 )
+PERMISSION_MODE_OPTIONS = (
+    ("full_access", "Full access · 读写文件和 Bash 均放行"),
+    ("ask_for_approval", "Ask for approval · 写文件和 Bash 需确认"),
+    ("accept_edits", "Accept edits · 文件读写放行，Bash 需确认"),
+)
+PERMISSION_MODE_NAMES = {
+    mode: label.partition(" ·")[0] for mode, label in PERMISSION_MODE_OPTIONS
+}
 
 
 class PipeBackend:
@@ -96,6 +104,12 @@ class PipeBackend:
         self.process.stdin.write(json.dumps({"type": "set_mode", "mode": mode}) + "\n")
         self.process.stdin.flush()
 
+    def set_permission_mode(self, mode: str) -> None:
+        self.process.stdin.write(
+            json.dumps({"type": "set_permission_mode", "mode": mode}) + "\n"
+        )
+        self.process.stdin.flush()
+
     def respond_plan_review(self, approved: bool, feedback: str = "") -> None:
         self.process.stdin.write(
             json.dumps(
@@ -120,17 +134,31 @@ class PipeBackend:
 
 
 def run_tui(
-    model: str, cwd: str | None = None, backend: PipeBackend | None = None
+    model: str,
+    cwd: str | None = None,
+    backend: PipeBackend | None = None,
+    permission_mode: str = "ask_for_approval",
 ) -> None:
     curses.wrapper(
         lambda screen: _Tui(
-            screen, model, cwd or os.getcwd(), backend or PipeBackend()
+            screen,
+            model,
+            cwd or os.getcwd(),
+            backend or PipeBackend(),
+            permission_mode,
         ).run()
     )
 
 
 class _Tui:
-    def __init__(self, screen: Any, model: str, cwd: str, backend: PipeBackend) -> None:
+    def __init__(
+        self,
+        screen: Any,
+        model: str,
+        cwd: str,
+        backend: PipeBackend,
+        permission_mode: str = "ask_for_approval",
+    ) -> None:
         self.screen = screen
         self.model = model
         self.cwd = cwd
@@ -164,6 +192,9 @@ class _Tui:
         self._permission_selection = len(PERMISSION_OPTIONS) - 1
         self._plan_review: PlanReviewEvent | None = None
         self._plan_review_selection = 0
+        self._permission_mode_open = False
+        self._permission_mode_selection = 1
+        self.permission_mode = permission_mode
         self._slash_selection = 0
         self.mode = "default"
 
@@ -196,6 +227,9 @@ class _Tui:
                     self._handle_permission_key(key)
                     continue
                 if self._plan_review is not None and self._handle_plan_review_key(key):
+                    continue
+                if self._permission_mode_open and key not in {3, "\x03"}:
+                    self._handle_permission_mode_key(key)
                     continue
                 if self._handle_slash_key(key):
                     continue
@@ -290,6 +324,13 @@ class _Tui:
             if slash_command[0] == "mode":
                 self.mode = "default" if self.mode == "plan" else "plan"
                 self.backend.set_mode(self.mode)
+            elif slash_command[0] == "permissions":
+                self._permission_mode_open = True
+                self._permission_mode_selection = next(
+                    index
+                    for index, (mode, _) in enumerate(PERMISSION_MODE_OPTIONS)
+                    if mode == self.permission_mode
+                )
             else:
                 self.messages.append(slash_command)
             self.input = ""
@@ -455,6 +496,28 @@ class _Tui:
         if isinstance(key, str) and key >= " ":
             self._plan_review_selection = 2
         return False
+
+    def _handle_permission_mode_key(self, key: object) -> None:
+        if key == curses.KEY_UP:
+            self._permission_mode_selection = (
+                self._permission_mode_selection - 1
+            ) % len(PERMISSION_MODE_OPTIONS)
+            return
+        if key == curses.KEY_DOWN:
+            self._permission_mode_selection = (
+                self._permission_mode_selection + 1
+            ) % len(PERMISSION_MODE_OPTIONS)
+            return
+        if key in {27, "\x1b"}:
+            self._permission_mode_open = False
+            return
+        if key not in {10, 13, "\n", "\r"}:
+            return
+        self.permission_mode = PERMISSION_MODE_OPTIONS[self._permission_mode_selection][
+            0
+        ]
+        self.backend.set_permission_mode(self.permission_mode)
+        self._permission_mode_open = False
 
     def _handle_slash_key(self, key: object) -> bool:
         if self._plan_review is not None:
@@ -633,9 +696,14 @@ class _Tui:
         plan_review_height = (
             len(PLAN_REVIEW_OPTIONS) + 1 if self._plan_review is not None else 0
         )
+        permission_mode_height = (
+            len(PERMISSION_MODE_OPTIONS) + 2 if self._permission_mode_open else 0
+        )
         slash_suggestions = (
             slash_command_suggestions(self.input)
-            if self._permission_request is None and self._plan_review is None
+            if self._permission_request is None
+            and self._plan_review is None
+            and not self._permission_mode_open
             else None
         )
         if slash_suggestions:
@@ -645,7 +713,12 @@ class _Tui:
         slash_height = (
             max(1, len(slash_suggestions)) + 1 if slash_suggestions is not None else 0
         )
-        panel_height = permission_height or plan_review_height or slash_height
+        panel_height = (
+            permission_height
+            or plan_review_height
+            or permission_mode_height
+            or slash_height
+        )
         max_input_rows = max(
             1,
             min(
@@ -765,6 +838,15 @@ class _Tui:
                 )
 
         self.screen.hline(input_y, 0, curses.ACS_HLINE, width, separator)
+        self.screen.addstr(
+            input_y,
+            2,
+            _clip(
+                f" permissions: {PERMISSION_MODE_NAMES[self.permission_mode]} ",
+                max(1, width - 4),
+            ),
+            _color(MUTED_COLOR),
+        )
         self.screen.addstr(input_y + 1, 0, "›", _color(DUCK_COLOR) | curses.A_BOLD)
         self._input_geometry = []
         selection = self._selection()
@@ -808,6 +890,12 @@ class _Tui:
             )
         elif self._plan_review is not None:
             self._draw_plan_review(
+                input_y + len(visible_input) + 2,
+                width,
+                separator,
+            )
+        elif self._permission_mode_open:
+            self._draw_permission_mode_panel(
                 input_y + len(visible_input) + 2,
                 width,
                 separator,
@@ -885,6 +973,40 @@ class _Tui:
             )
         self.screen.hline(
             top + 2 + len(PERMISSION_OPTIONS),
+            0,
+            curses.ACS_HLINE,
+            width,
+            separator,
+        )
+
+    def _draw_permission_mode_panel(
+        self,
+        top: int,
+        width: int,
+        separator: int,
+    ) -> None:
+        self.screen.addstr(
+            top,
+            0,
+            _clip("? 选择权限模式", width),
+            _color(DUCK_COLOR) | curses.A_BOLD,
+        )
+        for index, (_, label) in enumerate(PERMISSION_MODE_OPTIONS):
+            attributes = _color(TEXT_COLOR)
+            if index == self._permission_mode_selection:
+                attributes |= curses.A_REVERSE
+            self.screen.addstr(
+                top + 1 + index,
+                2,
+                _clip(
+                    ("› " if index == self._permission_mode_selection else "  ")
+                    + label,
+                    max(1, width - 2),
+                ),
+                attributes,
+            )
+        self.screen.hline(
+            top + 1 + len(PERMISSION_MODE_OPTIONS),
             0,
             curses.ACS_HLINE,
             width,

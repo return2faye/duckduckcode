@@ -261,13 +261,21 @@ class MainTest(unittest.TestCase):
             patch("sys.argv", ["duckduckcode"]),
             patch("duckduckcode.main.Config.from_env", return_value=config),
             patch("duckduckcode.main.Path.cwd", return_value=Path("/project")),
+            patch(
+                "duckduckcode.main.RulePolicy.read_permission_mode",
+                return_value="accept_edits",
+            ),
             patch("duckduckcode.main.build_agent") as build,
             patch("duckduckcode.main.run_tui") as run,
         ):
             main()
 
         build.assert_not_called()
-        run.assert_called_once_with("o4-mini", "/project")
+        run.assert_called_once_with(
+            "o4-mini",
+            "/project",
+            permission_mode="accept_edits",
+        )
 
     def test_main_exits_cleanly_if_tui_receives_keyboard_interrupt(self) -> None:
         config = Config("test-key")

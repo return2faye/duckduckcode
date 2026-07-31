@@ -72,6 +72,37 @@ class RulePolicyTest(unittest.TestCase):
 
             self.assertEqual(decision.action, "ask")
             self.assertEqual(decision.content, "git status")
+            self.assertEqual(policy.permission_mode, "ask_for_approval")
+
+    def test_persists_local_permission_mode_without_losing_rules(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as home_directory,
+            tempfile.TemporaryDirectory() as workspace_directory,
+            tempfile.TemporaryDirectory() as temporary_directory,
+        ):
+            home = Path(home_directory)
+            workspace = Path(workspace_directory)
+            temporary = Path(temporary_directory)
+            policy = RulePolicy.load(workspace, temporary, TOOLS, home=home)
+            call = ToolCall("call", "Bash", {"command": "git status"})
+            policy.remember_allow(call)
+
+            policy.set_permission_mode("accept_edits")
+
+            local_file = workspace / ".duckduckcode" / "permissions.local.yaml"
+            data = yaml.safe_load(local_file.read_text(encoding="utf-8"))
+            self.assertEqual(data["permission_mode"], "accept_edits")
+            self.assertEqual(
+                data["Bash"],
+                [{"content": "git status", "action": "allow"}],
+            )
+            reloaded = RulePolicy.load(workspace, temporary, TOOLS, home=home)
+            self.assertEqual(reloaded.permission_mode, "accept_edits")
+            self.assertEqual(
+                RulePolicy.read_permission_mode(workspace),
+                "accept_edits",
+            )
+            self.assertEqual(reloaded.check(call).action, "allow")
 
     def test_merges_rules_normalizes_paths_and_applies_decision_order(self) -> None:
         with (
@@ -279,6 +310,26 @@ Bash:
                             TOOLS,
                             home=Path(home_directory),
                         )
+
+    def test_rejects_invalid_local_permission_mode(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as home_directory,
+            tempfile.TemporaryDirectory() as workspace_directory,
+            tempfile.TemporaryDirectory() as temporary_directory,
+        ):
+            workspace = Path(workspace_directory)
+            permission_directory = workspace / ".duckduckcode"
+            permission_directory.mkdir()
+            local_file = permission_directory / "permissions.local.yaml"
+            local_file.write_text("permission_mode: unrestricted\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "invalid permission_mode"):
+                RulePolicy.load(
+                    workspace,
+                    Path(temporary_directory),
+                    TOOLS,
+                    home=Path(home_directory),
+                )
 
     def test_remember_allow_writes_exact_local_rules_and_reloads_them(self) -> None:
         with (

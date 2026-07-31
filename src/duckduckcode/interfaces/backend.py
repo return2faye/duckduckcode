@@ -46,6 +46,9 @@ def run_backend(
                     else:
                         raise ValueError("Unsupported agent mode.")
                     continue
+                if data.get("type") == "set_permission_mode":
+                    agent.set_permission_mode(data.get("mode"))
+                    continue
                 message = data["message"]
                 active = True
                 _run_stream(agent, message, input_stream, output_stream)

@@ -40,7 +40,11 @@ def main() -> None:
             agent = build_agent(config, workspace)
             run_backend(agent)
             return
-        run_tui(config.openai_model, str(workspace))
+        run_tui(
+            config.openai_model,
+            str(workspace),
+            permission_mode=RulePolicy.read_permission_mode(workspace),
+        )
     except KeyboardInterrupt:
         pass
     except RuntimeError as exc:

@@ -20,7 +20,7 @@ from .event import (
     TurnCompleteEvent,
     UsageEvent,
 )
-from ..permissions import PermissionChecker
+from ..permissions import PermissionChecker, PermissionMode
 from ..tools.tool import ToolCall, ToolManager, ToolResult
 
 AgentResponse = PermissionChoice | PlanReviewResponse | None
@@ -64,6 +64,9 @@ class Agent:
             "Plan Mode was cancelled. Do not execute the pending plan "
             "unless the user asks again."
         )
+
+    def set_permission_mode(self, mode: PermissionMode) -> None:
+        self.permission_checker.set_permission_mode(mode)
 
     def stream(self, user_message: str) -> Generator[AgentEvent, AgentResponse, None]:
         self.permission_checker.start_task()
@@ -198,18 +201,16 @@ class Agent:
             if tool_call.name == "ExitPlanMode":
                 completed.append((tool_call, (yield from self._review_plan())))
                 continue
-            if self.context.mode == "plan":
-                tool = self.tools.get(tool_call.name)
-                if tool is None:
-                    allowed.append(tool_call)
-                    continue
+            get_tool = getattr(self.tools, "get", None)
+            tool = get_tool(tool_call.name) if callable(get_tool) else None
+            if self.context.mode == "plan" and tool is not None:
                 decision = self.permission_checker.check(
                     tool_call,
                     tool=tool,
                     plan_file=self.plan_file,
                 )
             else:
-                decision = self.permission_checker.check(tool_call)
+                decision = self.permission_checker.check(tool_call, tool=tool)
             if decision.action in {"allow", "unspecified"}:
                 allowed.append(tool_call)
                 continue

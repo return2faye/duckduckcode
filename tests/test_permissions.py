@@ -111,12 +111,106 @@ class PermissionCheckerTest(unittest.TestCase):
             with self.subTest(call=call):
                 self.assertEqual(self.checker.check(call).action, "unspecified")
 
+    def test_permission_modes_apply_the_read_write_and_bash_matrix(self) -> None:
+        class FakePolicy:
+            permission_mode = "ask_for_approval"
+
+            def check(self, tool_call):
+                if tool_call.call_id == "denied":
+                    return PermissionDecision("deny", "explicit deny", "input")
+                if tool_call.call_id == "allowed":
+                    return PermissionDecision("allow", content="input")
+                return PermissionDecision("ask", "approval required", "input")
+
+            def remember_allow(self, tool_call):
+                pass
+
+            def set_permission_mode(self, mode):
+                self.permission_mode = mode
+
+        policy = FakePolicy()
+        checker = PermissionChecker([check_bash_blacklist], policy)
+        read = create_tool(
+            "ReadFile",
+            "read",
+            {"type": "object", "properties": {}},
+            lambda: "",
+            lambda arguments: arguments,
+            is_read_only=True,
+            category="file",
+        )
+        write = create_tool(
+            "WriteFile",
+            "write",
+            {"type": "object", "properties": {}},
+            lambda: "",
+            lambda arguments: arguments,
+            category="file",
+        )
+        bash = create_tool(
+            "Bash",
+            "bash",
+            {"type": "object", "properties": {}},
+            lambda: "",
+            lambda arguments: arguments,
+            category="shell",
+        )
+        expected = {
+            "ask_for_approval": ("allow", "ask", "ask"),
+            "accept_edits": ("allow", "allow", "ask"),
+            "full_access": ("allow", "allow", "allow"),
+        }
+
+        for mode, actions in expected.items():
+            checker.set_permission_mode(mode)
+            actual = (
+                checker.check(
+                    ToolCall("read", "ReadFile", {"path": "README.md"}),
+                    tool=read,
+                ).action,
+                checker.check(
+                    ToolCall("write", "WriteFile", {"path": "new.py"}),
+                    tool=write,
+                ).action,
+                checker.check(
+                    ToolCall("bash", "Bash", {"command": "git status"}),
+                    tool=bash,
+                ).action,
+            )
+            self.assertEqual(actual, actions)
+
+        checker.set_permission_mode("ask_for_approval")
+        self.assertEqual(
+            checker.check(
+                ToolCall("allowed", "Bash", {"command": "git status"}),
+                tool=bash,
+            ).action,
+            "allow",
+        )
+        checker.set_permission_mode("full_access")
+        self.assertEqual(
+            checker.check(
+                ToolCall("denied", "WriteFile", {"path": "new.py"}),
+                tool=write,
+            ).action,
+            "deny",
+        )
+        self.assertEqual(
+            checker.check(
+                ToolCall("blocked", "Bash", {"command": "rm -rf build"}),
+                tool=bash,
+            ).action,
+            "deny",
+        )
+
     def test_plan_mode_only_bypasses_prompts_for_safe_exploration_and_plan_file(
         self,
     ) -> None:
         plan_file = Path("/workspace/.duckduckcode/plan.md")
 
         class AskPolicy:
+            permission_mode = "full_access"
+
             def check(self, tool_call):
                 if tool_call.call_id == "denied":
                     return PermissionDecision("deny", "explicit deny", "secret")

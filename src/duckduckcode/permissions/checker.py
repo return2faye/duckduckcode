@@ -6,7 +6,11 @@ import shlex
 from typing import Protocol
 
 from ..tools.tool import Tool, ToolCall
-from .rule_policy import PermissionDecision
+from .rule_policy import (
+    DEFAULT_PERMISSION_MODE,
+    PermissionDecision,
+    PermissionMode,
+)
 
 PermissionRule = Callable[[ToolCall], str | None]
 _READ_ONLY_GIT_COMMANDS = {
@@ -27,9 +31,13 @@ _UNSAFE_GIT_OPTIONS = (
 
 
 class PermissionPolicy(Protocol):
+    permission_mode: PermissionMode
+
     def check(self, tool_call: ToolCall) -> PermissionDecision: ...
 
     def remember_allow(self, tool_call: ToolCall) -> None: ...
+
+    def set_permission_mode(self, mode: PermissionMode) -> None: ...
 
 
 class PermissionChecker:
@@ -56,16 +64,43 @@ class PermissionChecker:
             decision = self._policy.check(tool_call)
         else:
             decision = PermissionDecision("unspecified")
-        if plan_file is None or decision.action == "deny":
+        if decision.action == "deny":
             return decision
-        if tool is not None and _is_plan_safe(tool_call, tool, plan_file):
+        if plan_file is not None:
+            if tool is not None and _is_plan_safe(tool_call, tool, plan_file):
+                return PermissionDecision("allow", content=decision.content)
+            return PermissionDecision(
+                "deny",
+                "Plan Mode is active. Write or update the plan file, then call "
+                "ExitPlanMode. Business files cannot be modified before plan approval.",
+                decision.content or _content(tool_call),
+            )
+        if tool is None or self._policy is None:
+            return decision
+        if (
+            self.permission_mode == "full_access"
+            or tool.is_read_only
+            or (self.permission_mode == "accept_edits" and tool.category == "file")
+        ):
             return PermissionDecision("allow", content=decision.content)
+        if decision.action == "allow":
+            return decision
         return PermissionDecision(
-            "deny",
-            "Plan Mode is active. Write or update the plan file, then call "
-            "ExitPlanMode. Business files cannot be modified before plan approval.",
+            "ask",
+            decision.message or "Permission approval required by permission mode.",
             decision.content or _content(tool_call),
         )
+
+    @property
+    def permission_mode(self) -> PermissionMode:
+        if self._policy is None:
+            return DEFAULT_PERMISSION_MODE
+        return getattr(self._policy, "permission_mode", DEFAULT_PERMISSION_MODE)
+
+    def set_permission_mode(self, mode: PermissionMode) -> None:
+        if self._policy is None:
+            raise RuntimeError("No permission policy is configured.")
+        self._policy.set_permission_mode(mode)
 
     def remember_allow(self, tool_call: ToolCall) -> None:
         if self._policy is None:

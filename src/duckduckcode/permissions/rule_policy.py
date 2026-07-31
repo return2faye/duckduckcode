@@ -15,6 +15,9 @@ from ..tools.tool import ToolCall
 
 PermissionAction = Literal["deny", "ask", "allow", "unspecified"]
 RuleAction = Literal["deny", "ask", "allow"]
+PermissionMode = Literal["full_access", "ask_for_approval", "accept_edits"]
+DEFAULT_PERMISSION_MODE: PermissionMode = "ask_for_approval"
+PERMISSION_MODES = frozenset({"full_access", "ask_for_approval", "accept_edits"})
 _ACTION_BY_NAME: dict[str, RuleAction] = {
     "deny": "deny",
     "ask": "ask",
@@ -47,12 +50,14 @@ class RulePolicy:
         rules: list[_Rule],
         local_file: Path,
         local_data: dict[str, list[dict[str, str]]],
+        permission_mode: PermissionMode,
     ) -> None:
         self.workspace = workspace.resolve()
         self.temporary_directory = temporary_directory.resolve()
         self.rules = rules
         self.local_file = local_file
         self._local_data = local_data
+        self.permission_mode = permission_mode
 
     @classmethod
     def load(
@@ -82,8 +87,9 @@ class RulePolicy:
             _initialize_file(path, known_tools)
         rules: list[_Rule] = []
         local_data: dict[str, list[dict[str, str]]] = {}
+        permission_mode = DEFAULT_PERMISSION_MODE
         for path, local in sources:
-            source_rules, data = _load_file(
+            source_rules, data, source_mode = _load_file(
                 path,
                 local,
                 workspace,
@@ -93,13 +99,45 @@ class RulePolicy:
             rules.extend(source_rules)
             if local:
                 local_data = data
+                permission_mode = source_mode
         return cls(
             workspace,
             temporary_directory,
             rules,
             local_file,
             local_data,
+            permission_mode,
         )
+
+    @staticmethod
+    def read_permission_mode(workspace: Path) -> PermissionMode:
+        path = workspace.resolve() / ".duckduckcode" / "permissions.local.yaml"
+        if not path.exists():
+            return DEFAULT_PERMISSION_MODE
+        if not path.parent.resolve().is_relative_to(workspace.resolve()):
+            raise RuntimeError(
+                f"Permission file '{path}' resolves outside the workspace."
+            )
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise RuntimeError(
+                f"Permission file '{path}' has invalid YAML: {exc}"
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                f"Could not read permission file '{path}': {exc}"
+            ) from exc
+        if loaded is None:
+            return DEFAULT_PERMISSION_MODE
+        if not isinstance(loaded, dict):
+            raise RuntimeError(f"Permission file '{path}' must contain a YAML mapping.")
+        mode = loaded.get("permission_mode", DEFAULT_PERMISSION_MODE)
+        if not isinstance(mode, str) or mode not in PERMISSION_MODES:
+            raise RuntimeError(
+                f"Permission file '{path}' has invalid permission_mode '{mode}'."
+            )
+        return mode
 
     def check(self, tool_call: ToolCall) -> PermissionDecision:
         content = self._content(tool_call)
@@ -159,31 +197,8 @@ class RulePolicy:
         tool_rules = local_data.setdefault(tool_call.name, [])
         if entry in tool_rules:
             return
-        self.local_file.parent.mkdir(parents=True, exist_ok=True)
-        permission_directory = self.local_file.parent.resolve()
-        if not permission_directory.is_relative_to(self.workspace):
-            raise RuntimeError(
-                f"Permission file '{self.local_file}' resolves outside the workspace."
-            )
         tool_rules.append(entry)
-        descriptor, temporary_path = tempfile.mkstemp(
-            prefix=".permissions.", suffix=".yaml", dir=permission_directory
-        )
-        target = permission_directory / self.local_file.name
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                yaml.safe_dump(
-                    local_data,
-                    stream,
-                    allow_unicode=True,
-                    sort_keys=False,
-                )
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary_path, target)
-        finally:
-            if os.path.exists(temporary_path):
-                os.unlink(temporary_path)
+        self._write_local(local_data, self.permission_mode)
         self._local_data = local_data
         self.rules.append(
             _build_rule(
@@ -196,6 +211,42 @@ class RulePolicy:
                 self.temporary_directory,
             )
         )
+
+    def set_permission_mode(self, mode: PermissionMode) -> None:
+        if mode not in PERMISSION_MODES:
+            raise ValueError(f"Unsupported permission mode '{mode}'.")
+        self._write_local(self._local_data, mode)
+        self.permission_mode = mode
+
+    def _write_local(
+        self,
+        local_data: dict[str, list[dict[str, str]]],
+        permission_mode: PermissionMode,
+    ) -> None:
+        self.local_file.parent.mkdir(parents=True, exist_ok=True)
+        permission_directory = self.local_file.parent.resolve()
+        if not permission_directory.is_relative_to(self.workspace):
+            raise RuntimeError(
+                f"Permission file '{self.local_file}' resolves outside the workspace."
+            )
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=".permissions.", suffix=".yaml", dir=permission_directory
+        )
+        target = permission_directory / self.local_file.name
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(
+                    {"permission_mode": permission_mode, **local_data},
+                    stream,
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, target)
+        finally:
+            if os.path.exists(temporary_path):
+                os.unlink(temporary_path)
 
     def _content(self, tool_call: ToolCall) -> str | None:
         if tool_call.name == "Bash":
@@ -236,9 +287,13 @@ def _load_file(
     workspace: Path,
     temporary_directory: Path,
     known_tools: set[str],
-) -> tuple[list[_Rule], dict[str, list[dict[str, str]]]]:
+) -> tuple[
+    list[_Rule],
+    dict[str, list[dict[str, str]]],
+    PermissionMode,
+]:
     if not path.exists():
-        return [], {}
+        return [], {}, DEFAULT_PERMISSION_MODE
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:
@@ -246,7 +301,7 @@ def _load_file(
     except OSError as exc:
         raise RuntimeError(f"Could not read permission file '{path}': {exc}") from exc
     if loaded is None:
-        return [], {}
+        return [], {}, DEFAULT_PERMISSION_MODE
     if not isinstance(loaded, dict):
         raise RuntimeError(f"Permission file '{path}' must contain a YAML mapping.")
     return _load_tool_rules(
@@ -311,10 +366,26 @@ def _load_tool_rules(
     workspace: Path,
     temporary_directory: Path,
     known_tools: set[str],
-) -> tuple[list[_Rule], dict[str, list[dict[str, str]]]]:
+) -> tuple[
+    list[_Rule],
+    dict[str, list[dict[str, str]]],
+    PermissionMode,
+]:
     rules: list[_Rule] = []
     data = {tool_name: [] for tool_name in sorted(known_tools)}
+    permission_mode = DEFAULT_PERMISSION_MODE
     for tool_name, entries in loaded.items():
+        if tool_name == "permission_mode":
+            if not local:
+                raise RuntimeError(
+                    f"Permission file '{path}' may only set permission_mode locally."
+                )
+            if not isinstance(entries, str) or entries not in PERMISSION_MODES:
+                raise RuntimeError(
+                    f"Permission file '{path}' has invalid permission_mode '{entries}'."
+                )
+            permission_mode = entries
+            continue
         if not isinstance(tool_name, str) or tool_name not in known_tools:
             raise RuntimeError(
                 f"Permission file '{path}' references unknown tool '{tool_name}'."
@@ -354,7 +425,7 @@ def _load_tool_rules(
                     temporary_directory,
                 )
             )
-    return rules, data
+    return rules, data, permission_mode
 
 
 def _build_rule(

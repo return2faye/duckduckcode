@@ -165,6 +165,7 @@ class TuiTest(unittest.TestCase):
 
         backend.set_mode("plan")
         backend.set_mode("default")
+        backend.set_permission_mode("accept_edits")
         backend.respond_plan_review(False, "Use SQLite instead")
 
         process.stdin.seek(0)
@@ -173,6 +174,7 @@ class TuiTest(unittest.TestCase):
             [
                 {"type": "set_mode", "mode": "plan"},
                 {"type": "set_mode", "mode": "default"},
+                {"type": "set_permission_mode", "mode": "accept_edits"},
                 {
                     "type": "plan_review_response",
                     "approved": False,
@@ -352,6 +354,7 @@ class TuiTest(unittest.TestCase):
                     "duckduckcode",
                     "Available slash commands:\n"
                     "/help  Show available commands\n"
+                    "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode",
                 ),
             ),
@@ -384,7 +387,13 @@ class TuiTest(unittest.TestCase):
             suggestions("/h"),
             [("/help", "Show available commands")],
         )
-        self.assertEqual(suggestions("/p"), [("/plan", "Toggle Plan Mode")])
+        self.assertEqual(
+            suggestions("/p"),
+            [
+                ("/permissions", "Choose a permission mode"),
+                ("/plan", "Toggle Plan Mode"),
+            ],
+        )
         self.assertEqual(suggestions("/missing"), [])
         self.assertIsNone(suggestions("hello"))
 
@@ -432,6 +441,80 @@ class TuiTest(unittest.TestCase):
         self.assertEqual(tui.messages, [])
         self.assertIsNone(tui._events)
 
+    def test_permissions_slash_command_opens_and_applies_mode_menu(self) -> None:
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.permission_modes = []
+
+            def set_permission_mode(self, mode):
+                self.permission_modes.append(mode)
+
+        backend = FakeBackend()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.input = "/permissions"
+        tui.cursor_index = len(tui.input)
+
+        tui._send()
+
+        self.assertTrue(tui._permission_mode_open)
+        self.assertEqual(tui._permission_mode_selection, 1)
+        tui._handle_permission_mode_key(curses.KEY_DOWN)
+        tui._handle_permission_mode_key("\n")
+
+        self.assertFalse(tui._permission_mode_open)
+        self.assertEqual(tui.permission_mode, "accept_edits")
+        self.assertEqual(backend.permission_modes, ["accept_edits"])
+        self.assertEqual(tui.messages, [])
+        self.assertIsNone(tui._events)
+
+    def test_input_panel_shows_current_permission_mode(self) -> None:
+        class FakeScreen:
+            def __init__(self) -> None:
+                self.strings = []
+
+            def erase(self):
+                pass
+
+            def getmaxyx(self):
+                return 18, 80
+
+            def addstr(self, *args):
+                self.strings.append(args)
+
+            def hline(self, *args):
+                pass
+
+            def addch(self, *args):
+                pass
+
+            def move(self, *args):
+                pass
+
+            def refresh(self):
+                pass
+
+        screen = FakeScreen()
+        tui = _Tui(
+            screen,
+            "model",
+            "/tmp",
+            object(),
+            permission_mode="accept_edits",
+        )
+
+        with (
+            patch("duckduckcode.interfaces.tui._color", return_value=0),
+            patch("duckduckcode.interfaces.tui.curses.ACS_HLINE", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_CKBOARD", 0, create=True),
+            patch("duckduckcode.interfaces.tui.curses.ACS_VLINE", 0, create=True),
+        ):
+            tui._draw()
+
+        self.assertIn(
+            " permissions: Accept edits ",
+            [args[2] for args in screen.strings if len(args) >= 3],
+        )
+
     def test_slash_dropdown_uses_arrows_and_enter(self) -> None:
         tui = _Tui(object(), "model", "/tmp", object())
         tui.input = "/"
@@ -458,6 +541,7 @@ class TuiTest(unittest.TestCase):
                     "duckduckcode",
                     "Available slash commands:\n"
                     "/help  Show available commands\n"
+                    "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode",
                 )
             ],

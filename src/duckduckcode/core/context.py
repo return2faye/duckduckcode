@@ -132,6 +132,12 @@ class ContextManager:
     def fail_assistant_stream(self, index: int) -> None:
         self._set_assistant_stream_status(index, "error", 0)
 
+    def discard_assistant_stream(self, index: int) -> None:
+        message = self._messages[index]
+        if index != len(self._messages) - 1 or message.status != "streaming":
+            raise RuntimeError("Can only discard the active assistant stream")
+        self._messages.pop()
+
     def _set_assistant_stream_status(
         self, index: int, status: Literal["completed", "error"], token_usage: int
     ) -> None:

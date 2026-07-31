@@ -34,6 +34,7 @@ from ..tools.tool import ToolCall, ToolManager, ToolResult
 
 AgentResponse = PermissionChoice | PlanReviewResponse | None
 COMPACTION_MAX_ATTEMPTS = 3
+MAX_CONTEXT_LENGTH_RECOVERIES = 1
 
 
 class Agent:
@@ -107,6 +108,7 @@ class Agent:
         plan_execution_pending = False
         approved_plan_active = False
         plan_execution_failed = False
+        context_length_recoveries = 0
 
         for iteration in range(1, self.max_iterations + 1):
             if self.context.should_compact():
@@ -124,35 +126,68 @@ class Agent:
             tool_calls = []
             stream_finished = False
             token_usage = 0
+            api_error: ErrorEvent | None = None
 
             try:
                 try:
-                    for event in self.client.stream(
-                        messages,
-                        tools=self.context.tool_schemas(),
-                        reasoning=self.context.reasoning,
-                    ):
-                        if isinstance(event, ConversationEvent):
-                            self.context.append_assistant_delta(
-                                assistant_index, event.delta
-                            )
-                            yield event
-                        elif isinstance(event, ToolCallEvent):
-                            tool_calls.append(event.tool_call)
-                            yield event
-                        elif isinstance(event, DoneEvent):
-                            self.context.finish_assistant_stream(
-                                assistant_index, event.token_usage
-                            )
+                    try:
+                        events = self.client.stream(
+                            messages,
+                            tools=self.context.tool_schemas(),
+                            reasoning=self.context.reasoning,
+                        )
+                        try:
+                            for event in events:
+                                if isinstance(event, ConversationEvent):
+                                    self.context.append_assistant_delta(
+                                        assistant_index, event.delta
+                                    )
+                                    yield event
+                                elif isinstance(event, ToolCallEvent):
+                                    tool_calls.append(event.tool_call)
+                                    yield event
+                                elif isinstance(event, DoneEvent):
+                                    self.context.finish_assistant_stream(
+                                        assistant_index, event.token_usage
+                                    )
+                                    stream_finished = True
+                                    token_usage = event.token_usage
+                                    break
+                                elif isinstance(event, ErrorEvent):
+                                    api_error = event
+                                    break
+                        finally:
+                            close = getattr(events, "close", None)
+                            if close is not None:
+                                close()
+                    except Exception as exc:
+                        api_error = _error_from_exception(exc)
+
+                    if api_error is not None:
+                        assistant = self.context.messages()[assistant_index]
+                        can_recover = (
+                            _is_context_length_error(api_error)
+                            and context_length_recoveries
+                            < MAX_CONTEXT_LENGTH_RECOVERIES
+                            and not assistant.content
+                            and not tool_calls
+                        )
+                        if can_recover:
+                            self.context.discard_assistant_stream(assistant_index)
                             stream_finished = True
-                            token_usage = event.token_usage
-                            break
-                        elif isinstance(event, ErrorEvent):
+                            status = yield from self._compact(automatic=True)
+                            if status == "completed":
+                                context_length_recoveries += 1
+                                continue
+                            if status == "error":
+                                yield LoopCompleteEvent("error", iteration)
+                                return
+                        else:
                             self.context.fail_assistant_stream(assistant_index)
                             stream_finished = True
-                            yield event
-                            yield LoopCompleteEvent("error", iteration)
-                            return
+                        yield api_error
+                        yield LoopCompleteEvent("error", iteration)
+                        return
 
                     completed_results = []
                     if tool_calls:
@@ -464,3 +499,33 @@ def _extract_summary(output: str) -> str:
     if not summary:
         raise RuntimeError("the model returned an empty summary")
     return summary
+
+
+def _error_from_exception(exc: Exception) -> ErrorEvent:
+    code = getattr(exc, "code", None)
+    body = getattr(exc, "body", None)
+    if code is None and isinstance(body, dict):
+        nested = body.get("error")
+        code = body.get("code") or (
+            nested.get("code") if isinstance(nested, dict) else None
+        )
+    return ErrorEvent(str(exc), str(code) if code is not None else None)
+
+
+def _is_context_length_error(error: ErrorEvent) -> bool:
+    text = f"{error.code or ''} {error.message}".lower().replace("-", "_")
+    return any(
+        marker in text
+        for marker in (
+            "context_length_exceeded",
+            "context_length",
+            "context window",
+            "maximum context length",
+            "prompt_too_long",
+            "prompt too long",
+            "prompt is too long",
+            "too many tokens",
+            "input too long",
+            "exceeds the maximum number of tokens",
+        )
+    )

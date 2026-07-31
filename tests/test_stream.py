@@ -68,6 +68,32 @@ class OpenAIStreamTest(unittest.TestCase):
                     "Event",
                     (),
                     {
+                        "type": "response.failed",
+                        "response": type(
+                            "Response",
+                            (),
+                            {
+                                "error": type(
+                                    "Error",
+                                    (),
+                                    {
+                                        "message": "Prompt too long",
+                                        "code": "context_length_exceeded",
+                                    },
+                                )()
+                            },
+                        )(),
+                    },
+                )()
+            ),
+            ErrorEvent("Prompt too long", "context_length_exceeded"),
+        )
+        self.assertEqual(
+            parser.parse(
+                type(
+                    "Event",
+                    (),
+                    {
                         "type": "response.completed",
                         "response": type(
                             "Response",

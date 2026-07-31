@@ -936,6 +936,102 @@ class AgentTest(unittest.TestCase):
         )
         self.assertEqual(events[-1], LoopCompleteEvent("error", 1))
 
+    def test_stream_compacts_and_retries_after_context_length_exception(self) -> None:
+        class PromptTooLongError(Exception):
+            code = "context_length_exceeded"
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def stream(
+                self,
+                messages,
+                tools=None,
+                reasoning=None,
+                max_output_tokens=None,
+            ):
+                self.calls += 1
+                if max_output_tokens is not None:
+                    yield ConversationEvent(
+                        "<analysis>checked</analysis><summary>recovered</summary>"
+                    )
+                    yield DoneEvent()
+                    return
+                if self.calls == 1:
+                    raise PromptTooLongError("Prompt too long")
+                yield ConversationEvent("done")
+                yield DoneEvent(3)
+
+        context = ContextManager(system_prompt="system")
+        context.add_user("old request " + "x" * 100_000)
+        context.add_assistant("old answer")
+        client = Client()
+
+        events = list(Agent(client, context).stream("current request"))
+
+        self.assertEqual(client.calls, 3)
+        self.assertFalse(any(isinstance(event, ErrorEvent) for event in events))
+        self.assertEqual(context.abstraction, "recovered")
+        self.assertEqual(
+            context.messages(),
+            [
+                Message("user", "current request"),
+                Message("assistant", "done", token_usage=3),
+            ],
+        )
+        self.assertEqual(
+            sum(
+                isinstance(event, ContextCompactionEvent)
+                and event.status == "completed"
+                for event in events
+            ),
+            1,
+        )
+
+    def test_stream_only_recovers_once_from_context_length_errors(self) -> None:
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def stream(
+                self,
+                messages,
+                tools=None,
+                reasoning=None,
+                max_output_tokens=None,
+            ):
+                self.calls += 1
+                if max_output_tokens is not None:
+                    yield ConversationEvent(
+                        "<analysis>checked</analysis><summary>recovered</summary>"
+                    )
+                    yield DoneEvent()
+                    return
+                yield ErrorEvent("Prompt too long", "context_length_exceeded")
+
+        context = ContextManager(system_prompt="system")
+        context.add_user("old request " + "x" * 100_000)
+        context.add_assistant("old answer")
+        client = Client()
+
+        events = list(Agent(client, context).stream("current request"))
+
+        self.assertEqual(client.calls, 3)
+        self.assertEqual(
+            [event for event in events if isinstance(event, ErrorEvent)],
+            [ErrorEvent("Prompt too long", "context_length_exceeded")],
+        )
+        self.assertEqual(events[-1], LoopCompleteEvent("error", 2))
+        self.assertEqual(
+            sum(
+                isinstance(event, ContextCompactionEvent)
+                and event.status == "completed"
+                for event in events
+            ),
+            1,
+        )
+
     def test_plan_mode_start_and_cancel_manage_the_plan_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             plan_file = Path(directory) / "plan.md"

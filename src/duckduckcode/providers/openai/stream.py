@@ -28,12 +28,15 @@ class OpenAIStreamEventParser:
                 getattr(event, "message", ""), getattr(event, "code", None)
             )
         if event_type == "response.failed":
-            return ErrorEvent(
-                str(
-                    getattr(
-                        getattr(event, "response", None), "error", "response failed"
-                    )
+            error = getattr(getattr(event, "response", None), "error", None)
+            if isinstance(error, dict):
+                return ErrorEvent(
+                    str(error.get("message", "response failed")),
+                    error.get("code"),
                 )
+            return ErrorEvent(
+                str(getattr(error, "message", None) or error or "response failed"),
+                getattr(error, "code", None),
             )
         if event_type == "response.completed":
             return DoneEvent(_token_usage(getattr(event, "response", None)))

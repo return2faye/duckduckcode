@@ -641,7 +641,7 @@ class AgentTest(unittest.TestCase):
             ],
         )
 
-    def test_manual_compaction_uses_no_tools_and_atomically_replaces_summary(
+    def test_manual_compaction_keeps_tool_schemas_and_atomically_replaces_summary(
         self,
     ) -> None:
         calls = []
@@ -663,13 +663,25 @@ class AgentTest(unittest.TestCase):
         context.add_user("old request " + "x" * 100_000)
         context.add_assistant("old answer")
         context.add_user("current request")
-        agent = Agent(CompactionClient(), context)
+        tools = ToolManager()
+        tools.register(
+            "Echo",
+            "Echo text",
+            {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            lambda text: text,
+        )
+        agent = Agent(CompactionClient(), context, tools)
 
         events = list(agent.compact())
 
-        self.assertEqual(calls[0][1], None)
+        self.assertEqual(calls[0][1], tools.schemas())
         self.assertEqual(calls[0][2], COMPACTION_OUTPUT_TOKENS)
-        self.assertIn("Do not call tools", calls[0][0][0].content)
+        self.assertNotIn("Do not call tools", calls[0][0][0].content)
         self.assertEqual(context.abstraction, "durable summary")
         self.assertEqual(context.messages(), [Message("user", "current request")])
         self.assertEqual(
@@ -689,6 +701,7 @@ class AgentTest(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
                 self.succeed = False
+                self.messages = []
 
             def stream(
                 self,
@@ -698,6 +711,7 @@ class AgentTest(unittest.TestCase):
                 max_output_tokens=None,
             ):
                 self.calls += 1
+                self.messages.append(list(messages))
                 if self.succeed:
                     yield ConversationEvent(
                         "<analysis>checked</analysis>"
@@ -705,7 +719,10 @@ class AgentTest(unittest.TestCase):
                     )
                     yield DoneEvent()
                     return
-                yield ToolCallEvent(ToolCall("call_1", "ReadFile", {"path": "/x"}))
+                yield ToolCallEvent(
+                    ToolCall(f"call_{self.calls}", "ReadFile", {"path": "/x"})
+                )
+                yield DoneEvent()
 
         context = ContextManager(system_prompt="system", abstraction="old summary")
         context.add_user("old request " + "x" * 100_000)
@@ -718,6 +735,12 @@ class AgentTest(unittest.TestCase):
         events = list(agent.compact())
 
         self.assertEqual(client.calls, 3)
+        self.assertTrue(
+            any(
+                message.kind == "tool_result" and '"isError": true' in message.content
+                for message in client.messages[1]
+            )
+        )
         self.assertEqual(context.abstraction, "old summary")
         self.assertEqual(context.messages(), original)
         self.assertTrue(any(isinstance(event, ErrorEvent) for event in events))
@@ -738,6 +761,66 @@ class AgentTest(unittest.TestCase):
                 for event in recovery
             )
         )
+
+    def test_compaction_returns_tool_errors_to_the_model_without_execution(
+        self,
+    ) -> None:
+        calls = []
+        executed = []
+
+        class Client:
+            def stream(
+                self,
+                messages,
+                tools=None,
+                reasoning=None,
+                max_output_tokens=None,
+            ):
+                calls.append((list(messages), tools))
+                if any(message.kind == "tool_result" for message in messages):
+                    yield ConversationEvent(
+                        "<analysis>checked</analysis><summary>summary</summary>"
+                    )
+                    yield DoneEvent()
+                    return
+                yield ToolCallEvent(
+                    ToolCall("call_1", "ReadFile", {"path": "/repo/a.py"})
+                )
+                yield DoneEvent()
+
+        tools = ToolManager()
+        tools.register(
+            "ReadFile",
+            "Read a file",
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            lambda path: executed.append(path),
+        )
+        context = ContextManager(system_prompt="system")
+        context.add_user("old request " + "x" * 100_000)
+        context.add_assistant("old answer")
+        context.add_user("current request")
+
+        events = list(Agent(Client(), context, tools).compact())
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1], tools.schemas())
+        self.assertEqual(calls[1][1], tools.schemas())
+        self.assertEqual(executed, [])
+        self.assertTrue(any(message.kind == "tool_call" for message in calls[1][0]))
+        self.assertTrue(
+            any(
+                message.kind == "tool_result"
+                and "Tools are unavailable" in message.content
+                for message in calls[1][0]
+            )
+        )
+        self.assertEqual(context.abstraction, "summary")
+        self.assertFalse(any(isinstance(event, ErrorEvent) for event in events))
 
     def test_compaction_retries_twice_before_succeeding(self) -> None:
         class Client:
@@ -805,7 +888,7 @@ class AgentTest(unittest.TestCase):
         events = list(Agent(Client(), context).stream("current request"))
 
         self.assertEqual(len(calls), 2)
-        self.assertIsNone(calls[0][1])
+        self.assertEqual(calls[0][1], [])
         self.assertGreater(calls[0][2], 0)
         self.assertLess(calls[0][2], COMPACTION_OUTPUT_TOKENS)
         self.assertLessEqual(

@@ -81,6 +81,7 @@ class Agent:
 
     def compact(self) -> Generator[AgentEvent, None, None]:
         self._compaction_circuit_open = False
+        self.context.set_tool_schemas(self.tools.schemas())
         status = yield from self._compact(automatic=False)
         yield LoopCompleteEvent("error" if status == "error" else "completed", 0)
 
@@ -259,7 +260,8 @@ class Agent:
             Message("system", COMPACTION_SYSTEM_PROMPT),
             Message("user", transcript),
         ]
-        input_tokens = self.context.estimate_request_tokens(messages)
+        tools = self.context.tool_schemas()
+        input_tokens = self.context.estimate_request_tokens(messages, tools)
         max_output_tokens = min(
             COMPACTION_OUTPUT_TOKENS,
             self.context.context_window_tokens - input_tokens - CONTEXT_SAFETY_TOKENS,
@@ -278,20 +280,33 @@ class Agent:
         usage = 0
         last_error: Exception | None = None
         for _ in range(COMPACTION_MAX_ATTEMPTS):
+            input_tokens = self.context.estimate_request_tokens(messages, tools)
+            max_output_tokens = min(
+                COMPACTION_OUTPUT_TOKENS,
+                self.context.context_window_tokens
+                - input_tokens
+                - CONTEXT_SAFETY_TOKENS,
+            )
+            if max_output_tokens < 1:
+                last_error = RuntimeError(
+                    "tool-call feedback exhausted the context window"
+                )
+                continue
             output = ""
             completed = False
             attempt_usage = 0
+            tool_calls: list[ToolCall] = []
             try:
                 for event in self.client.stream(
                     messages,
-                    tools=None,
+                    tools=tools,
                     reasoning=self.context.reasoning,
                     max_output_tokens=max_output_tokens,
                 ):
                     if isinstance(event, ConversationEvent):
                         output += event.delta
                     elif isinstance(event, ToolCallEvent):
-                        raise RuntimeError("the model attempted to call a tool")
+                        tool_calls.append(event.tool_call)
                     elif isinstance(event, ErrorEvent):
                         raise RuntimeError(event.message)
                     elif isinstance(event, DoneEvent):
@@ -300,6 +315,28 @@ class Agent:
                         break
                 if not completed:
                     raise RuntimeError("the model response did not complete")
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        messages.append(
+                            Message.tool_call(
+                                tool_call.call_id,
+                                tool_call.name,
+                                tool_call.arguments,
+                            )
+                        )
+                    for tool_call in tool_calls:
+                        messages.append(
+                            Message.tool_result(
+                                tool_call.call_id,
+                                ToolResult(
+                                    "Tools are unavailable during context compaction. "
+                                    "Return only the required <analysis> and <summary> "
+                                    "sections.",
+                                    is_error=True,
+                                ).to_model_output(),
+                            )
+                        )
+                    raise RuntimeError("the model attempted to call a tool")
                 self.context.apply_compaction(_extract_summary(output), cutoff)
                 usage += attempt_usage
                 self._compaction_circuit_open = False

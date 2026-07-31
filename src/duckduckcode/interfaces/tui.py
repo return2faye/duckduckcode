@@ -19,6 +19,7 @@ from ..core.event import (
     AgentEvent,
     ConversationEvent,
     ContextCompactionEvent,
+    ContextStatusEvent,
     ErrorEvent,
     LoopCompleteEvent,
     PermissionChoice,
@@ -90,6 +91,16 @@ class PipeBackend:
 
     def compact(self) -> Iterator[AgentEvent]:
         self.process.stdin.write(json.dumps({"type": "compact"}) + "\n")
+        self.process.stdin.flush()
+
+        for line in self.process.stdout:
+            event = _event_from_json(json.loads(line))
+            yield event
+            if isinstance(event, LoopCompleteEvent):
+                break
+
+    def context_status(self) -> Iterator[AgentEvent]:
+        self.process.stdin.write(json.dumps({"type": "status"}) + "\n")
         self.process.stdin.flush()
 
         for line in self.process.stdout:
@@ -353,6 +364,16 @@ class _Tui:
                     args=(self.backend, self._events),
                     daemon=True,
                 ).start()
+            elif slash_command[0] == "status":
+                self.messages.append(("duckduckcode", ""))
+                self._events = queue.Queue()
+                self._waiting = True
+                self._wait_frame = 0
+                threading.Thread(
+                    target=_read_status,
+                    args=(self.backend, self._events),
+                    daemon=True,
+                ).start()
             else:
                 self.messages.append(slash_command)
             self.input = ""
@@ -464,6 +485,13 @@ class _Tui:
                         "Nothing to compact; recent conversation was kept intact.",
                     )
                     self._waiting = False
+            elif isinstance(event, ContextStatusEvent):
+                status = _context_status_text(event)
+                if self._waiting:
+                    self.messages[-1] = ("duckduckcode", status)
+                    self._waiting = False
+                else:
+                    self.messages.append(("duckduckcode", status))
             elif isinstance(event, TurnCompleteEvent):
                 if not self._waiting:
                     self.messages.append(("duckduckcode", ""))
@@ -1304,6 +1332,12 @@ def _event_from_json(data: dict[str, Any]) -> AgentEvent:
             int(data.get("before_tokens", 0)),
             int(data.get("after_tokens", 0)),
         )
+    if event_type == "context_status":
+        return ContextStatusEvent(
+            int(data.get("used_tokens", 0)),
+            int(data.get("max_tokens", 0)),
+            int(data.get("auto_compact_tokens", 0)),
+        )
     if event_type == "turn_complete":
         return TurnCompleteEvent(int(data.get("iteration", 0)))
     if event_type == "loop_complete":
@@ -1336,6 +1370,30 @@ def _read_compact(backend: PipeBackend, events: queue.Queue[AgentEvent | None]) 
         events.put(ErrorEvent(str(exc)))
     finally:
         events.put(None)
+
+
+def _read_status(backend: PipeBackend, events: queue.Queue[AgentEvent | None]) -> None:
+    try:
+        for event in backend.context_status():
+            events.put(event)
+    except Exception as exc:
+        events.put(ErrorEvent(str(exc)))
+    finally:
+        events.put(None)
+
+
+def _context_status_text(event: ContextStatusEvent) -> str:
+    width = 20
+    percentage = event.used_tokens / max(1, event.max_tokens) * 100
+    filled = min(width, max(0, round(width * percentage / 100)))
+    bar = "█" * filled + "░" * (width - filled)
+    compact_percentage = event.auto_compact_tokens / max(1, event.max_tokens) * 100
+    return (
+        f"Context estimate {percentage:.1f}%\n"
+        f"[{bar}] {event.used_tokens:,} / {event.max_tokens:,} tokens\n"
+        f"Auto compact at {event.auto_compact_tokens:,} "
+        f"({compact_percentage:.1f}%)"
+    )
 
 
 def _ready_events(

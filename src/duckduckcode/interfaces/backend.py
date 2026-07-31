@@ -9,6 +9,7 @@ from ..core.agent import Agent
 from ..core.event import (
     ConversationEvent,
     ContextCompactionEvent,
+    ContextStatusEvent,
     ErrorEvent,
     LoopCompleteEvent,
     PermissionChoice,
@@ -53,6 +54,10 @@ def run_backend(
                 if data.get("type") == "compact":
                     active = True
                     _run_compact(agent, output_stream)
+                    continue
+                if data.get("type") == "status":
+                    active = True
+                    _run_status(agent, output_stream)
                     continue
                 message = data["message"]
                 active = True
@@ -105,6 +110,16 @@ def _run_stream(
 
 def _run_compact(agent: Agent, output_stream: TextIO) -> None:
     stream = agent.compact()
+    try:
+        for event in stream:
+            output_stream.write(json.dumps(_event_to_json(event)) + "\n")
+            output_stream.flush()
+    finally:
+        stream.close()
+
+
+def _run_status(agent: Agent, output_stream: TextIO) -> None:
+    stream = agent.context_status()
     try:
         for event in stream:
             output_stream.write(json.dumps(_event_to_json(event)) + "\n")
@@ -187,6 +202,13 @@ def _event_to_json(event: object) -> dict[str, object]:
             "automatic": event.automatic,
             "before_tokens": event.before_tokens,
             "after_tokens": event.after_tokens,
+        }
+    if isinstance(event, ContextStatusEvent):
+        return {
+            "type": "context_status",
+            "used_tokens": event.used_tokens,
+            "max_tokens": event.max_tokens,
+            "auto_compact_tokens": event.auto_compact_tokens,
         }
     if isinstance(event, TurnCompleteEvent):
         return {"type": "turn_complete", "iteration": event.iteration}

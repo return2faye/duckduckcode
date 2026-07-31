@@ -12,6 +12,7 @@ from unittest.mock import patch
 from duckduckcode.core.event import (
     ConversationEvent,
     ContextCompactionEvent,
+    ContextStatusEvent,
     ErrorEvent,
     LoopCompleteEvent,
     PermissionRequestEvent,
@@ -27,6 +28,7 @@ from duckduckcode.interfaces.tui import (
     PipeBackend,
     _Tui,
     _clip,
+    _context_status_text,
     _input_rows,
     _parse_sgr_mouse,
     _ready_events,
@@ -160,6 +162,29 @@ class TuiTest(unittest.TestCase):
         )
         process.stdin.seek(0)
         self.assertEqual(json.loads(process.stdin.read()), {"type": "compact"})
+
+    def test_pipe_backend_requests_context_status(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO(
+                    '{"type": "context_status", "used_tokens": 84000, '
+                    '"max_tokens": 200000, "auto_compact_tokens": 167000}\n'
+                    '{"type": "loop_complete", "reason": "completed", '
+                    '"iterations": 0}\n'
+                )
+
+        process = FakeProcess()
+
+        self.assertEqual(
+            list(PipeBackend(process).context_status()),
+            [
+                ContextStatusEvent(84_000, 200_000, 167_000),
+                LoopCompleteEvent("completed", 0),
+            ],
+        )
+        process.stdin.seek(0)
+        self.assertEqual(json.loads(process.stdin.read()), {"type": "status"})
 
     def test_pipe_backend_writes_permission_response(self) -> None:
         class FakeProcess:
@@ -381,7 +406,8 @@ class TuiTest(unittest.TestCase):
                     "/compact  Compact conversation context\n"
                     "/help  Show available commands\n"
                     "/permissions  Choose a permission mode\n"
-                    "/plan  Toggle Plan Mode",
+                    "/plan  Toggle Plan Mode\n"
+                    "/status  Show context window usage",
                 ),
             ),
             (
@@ -424,11 +450,19 @@ class TuiTest(unittest.TestCase):
             suggestions("/c"),
             [("/compact", "Compact conversation context")],
         )
+        self.assertEqual(
+            suggestions("/s"),
+            [("/status", "Show context window usage")],
+        )
         self.assertEqual(suggestions("/missing"), [])
         self.assertIsNone(suggestions("hello"))
         self.assertEqual(
             slash_command_module.handle_slash_command("/compact"),
             ("compact", ""),
+        )
+        self.assertEqual(
+            slash_command_module.handle_slash_command("/status"),
+            ("status", ""),
         )
 
     def test_plan_slash_command_switches_backend_without_calling_model(self) -> None:
@@ -577,7 +611,8 @@ class TuiTest(unittest.TestCase):
                     "/compact  Compact conversation context\n"
                     "/help  Show available commands\n"
                     "/permissions  Choose a permission mode\n"
-                    "/plan  Toggle Plan Mode",
+                    "/plan  Toggle Plan Mode\n"
+                    "/status  Show context window usage",
                 )
             ],
         )
@@ -861,6 +896,31 @@ class TuiTest(unittest.TestCase):
             tui.messages,
             [("duckduckcode", "Context compacted (170,000 → 40,000 tokens).")],
         )
+        self.assertIsNone(tui._events)
+
+    def test_consume_events_displays_context_window_status(self) -> None:
+        event = ContextStatusEvent(84_000, 200_000, 167_000)
+        tui = _Tui(object(), "model", "/tmp", object())
+        tui.messages = [("duckduckcode", "")]
+        tui._waiting = True
+        tui._events = queue.Queue()
+        for queued in (event, LoopCompleteEvent("completed", 0), None):
+            tui._events.put(queued)
+
+        tui._consume_events()
+
+        self.assertEqual(
+            tui.messages,
+            [
+                (
+                    "duckduckcode",
+                    "Context estimate 42.0%\n"
+                    "[████████░░░░░░░░░░░░] 84,000 / 200,000 tokens\n"
+                    "Auto compact at 167,000 (83.5%)",
+                )
+            ],
+        )
+        self.assertEqual(tui.messages[0][1], _context_status_text(event))
         self.assertIsNone(tui._events)
 
     def test_consume_events_clears_failed_context_compaction_status(self) -> None:

@@ -22,6 +22,7 @@ from duckduckcode.core.context import (
 from duckduckcode.core.event import (
     ConversationEvent,
     ContextCompactionEvent,
+    ContextStatusEvent,
     DoneEvent,
     ErrorEvent,
     LoopCompleteEvent,
@@ -615,6 +616,31 @@ class ToolManagerTest(unittest.TestCase):
 
 
 class AgentTest(unittest.TestCase):
+    def test_context_status_reports_replayable_window_without_calling_model(
+        self,
+    ) -> None:
+        class Client:
+            def stream(self, messages, tools=None, reasoning=None):
+                raise AssertionError("model must not be called")
+
+        context = ContextManager(system_prompt="system")
+        context.add_user("hello")
+        agent = Agent(Client(), context)
+
+        events = list(agent.context_status())
+
+        self.assertEqual(
+            events,
+            [
+                ContextStatusEvent(
+                    context.estimated_tokens(),
+                    200_000,
+                    167_000,
+                ),
+                LoopCompleteEvent("completed", 0),
+            ],
+        )
+
     def test_manual_compaction_uses_no_tools_and_atomically_replaces_summary(
         self,
     ) -> None:

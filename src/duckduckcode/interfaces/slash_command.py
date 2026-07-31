@@ -5,6 +5,7 @@ _COMMANDS = {
     "/help": "Show available commands",
     "/permissions": "Choose a permission mode",
     "/plan": "Toggle Plan Mode",
+    "/status": "Show context window usage",
 }
 
 
@@ -24,6 +25,8 @@ def handle_slash_command(text: str) -> tuple[str, str] | None:
     command = text.split(maxsplit=1)[0]
     if command == "/compact":
         return "compact", ""
+    if command == "/status":
+        return "status", ""
     if command == "/plan":
         return "mode", "plan"
     if command == "/permissions":

@@ -91,6 +91,13 @@ class ContextCompactionEvent:
     after_tokens: int = 0
 
 
+@dataclass(frozen=True)
+class ContextStatusEvent:
+    used_tokens: int
+    max_tokens: int
+    auto_compact_tokens: int
+
+
 StreamEvent = ConversationEvent | ToolCallEvent | ErrorEvent | DoneEvent
 AgentEvent = (
     ConversationEvent
@@ -102,5 +109,6 @@ AgentEvent = (
     | LoopCompleteEvent
     | UsageEvent
     | ContextCompactionEvent
+    | ContextStatusEvent
     | ErrorEvent
 )

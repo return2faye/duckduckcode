@@ -15,6 +15,7 @@ from .event import (
     AgentEvent,
     ConversationEvent,
     ContextCompactionEvent,
+    ContextStatusEvent,
     DoneEvent,
     ErrorEvent,
     LoopCompleteEvent,
@@ -82,6 +83,15 @@ class Agent:
         self._compaction_circuit_open = False
         status = yield from self._compact(automatic=False)
         yield LoopCompleteEvent("error" if status == "error" else "completed", 0)
+
+    def context_status(self) -> Generator[AgentEvent, None, None]:
+        self.context.set_tool_schemas(self.tools.schemas())
+        yield ContextStatusEvent(
+            self.context.estimated_tokens(),
+            self.context.context_window_tokens,
+            self.context.auto_compact_tokens,
+        )
+        yield LoopCompleteEvent("completed", 0)
 
     def stream(self, user_message: str) -> Generator[AgentEvent, AgentResponse, None]:
         self.permission_checker.start_task()

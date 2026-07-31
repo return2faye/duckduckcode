@@ -375,6 +375,15 @@ class PathSandboxTest(unittest.TestCase):
                     )
                 )
             )
+            self.assertIsNone(
+                sandbox(
+                    ToolCall(
+                        "result",
+                        "ReadFile",
+                        {"path": str(sandbox.tool_result_directory / "result.txt")},
+                    )
+                )
+            )
             self.assertEqual(
                 stat.S_IMODE(sandbox.temporary_directory.stat().st_mode), 0o700
             )
@@ -437,6 +446,8 @@ class PathSandboxTest(unittest.TestCase):
             nested = sandbox.temporary_directory / "cache" / "nested.txt"
             nested.parent.mkdir()
             nested.write_text("temporary", encoding="utf-8")
+            stored_result = sandbox.tool_result_directory / "result.txt"
+            stored_result.write_text("persistent", encoding="utf-8")
             checker = PermissionChecker([sandbox])
             task_directories = []
 
@@ -457,12 +468,14 @@ class PathSandboxTest(unittest.TestCase):
             list(agent.stream("finish this task"))
 
             self.assertFalse(sandbox.temporary_directory.exists())
+            self.assertTrue(stored_result.exists())
 
             list(agent.stream("start another task"))
 
             self.assertFalse(sandbox.temporary_directory.exists())
             self.assertEqual(task_directories, [(True, 0o700), (True, 0o700)])
             agent.close()
+            self.assertFalse(stored_result.exists())
 
 
 class AgentPermissionTest(unittest.TestCase):

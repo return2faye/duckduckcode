@@ -16,9 +16,18 @@ class PathSandbox:
         self._temporary = tempfile.TemporaryDirectory(
             prefix="duckduckcode-", dir=parent
         )
+        self._tool_results = tempfile.TemporaryDirectory(
+            prefix="duckduckcode-results-", dir=parent
+        )
         self.temporary_directory = Path(self._temporary.name).resolve()
+        self.tool_result_directory = Path(self._tool_results.name).resolve()
         self.temporary_directory.chmod(0o700)
-        self.allowed_directories = (self.workspace, self.temporary_directory)
+        self.tool_result_directory.chmod(0o700)
+        self.allowed_directories = (
+            self.workspace,
+            self.temporary_directory,
+            self.tool_result_directory,
+        )
         self._active = True
 
     def __call__(self, tool_call: ToolCall) -> str | None:
@@ -52,6 +61,7 @@ class PathSandbox:
 
     def close(self) -> None:
         self._temporary.cleanup()
+        self._tool_results.cleanup()
         self._active = False
 
     def start_task(self) -> None:

@@ -121,6 +121,18 @@ class Agent:
                     completed_results = []
                     if tool_calls:
                         completed_results = yield from self._execute_tools(tool_calls)
+                        results_by_id = {
+                            tool_call.call_id: (tool_call, result)
+                            for tool_call, result in completed_results
+                        }
+                        completed_results = [
+                            results_by_id[tool_call.call_id]
+                            for tool_call in tool_calls
+                            if tool_call.call_id in results_by_id
+                        ]
+                        completed_results = self.context.compact_tool_results(
+                            completed_results
+                        )
                         for tool_call, result in completed_results:
                             yield ToolResultEvent(
                                 tool_call.call_id,
@@ -271,4 +283,7 @@ class Agent:
             self.plan_file.unlink(missing_ok=True)
 
     def close(self) -> None:
-        self.permission_checker.close()
+        try:
+            self.context.close()
+        finally:
+            self.permission_checker.close()

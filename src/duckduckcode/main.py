@@ -88,8 +88,10 @@ def build_agent(config: Config, workspace: Path) -> Agent:
                     workspace,
                     model=config.openai_model,
                     temporary_directory=path_sandbox.temporary_directory,
+                    tool_result_directory=path_sandbox.tool_result_directory,
                 ),
                 reasoning=config.reasoning,
+                tool_result_directory=path_sandbox.tool_result_directory,
             ),
             tools,
             permission_checker=PermissionChecker(

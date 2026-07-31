@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -28,6 +29,7 @@ from duckduckcode.providers.openai.serialize import (
     OpenAIResponsesDeserializer,
     OpenAIResponsesSerializer,
 )
+from duckduckcode.tools.read_file import create_read_file_tool
 from duckduckcode.tools.tool import (
     ToolCall,
     ToolManager,
@@ -253,6 +255,7 @@ class ContextManagerTest(unittest.TestCase):
             os_name="TestOS",
             mode_instructions="Mode: test-only",
             model="test-model",
+            tool_result_directory="/results",
         )
 
         self.assertIn("You are DuckDuckCode", prompt)
@@ -263,6 +266,15 @@ class ContextManagerTest(unittest.TestCase):
         self.assertIn("Troubleshooting notebook:", prompt)
         self.assertIn("Security and safety:", prompt)
         self.assertIn("Use absolute file paths when calling file tools.", prompt)
+        self.assertIn(
+            "Large tool results may be stored in the Tool result directory",
+            prompt,
+        )
+        self.assertIn(
+            "use ReadFile with that absolute path and offset/limit, starting at offset 2",
+            prompt,
+        )
+        self.assertIn("do not assume the preview is the complete result", prompt)
         self.assertIn(
             'A normal user message such as "yes", "confirm", or "execute" '
             "does not approve the plan.",
@@ -283,10 +295,17 @@ class ContextManagerTest(unittest.TestCase):
         self.assertIn("Model: test-model", prompt)
         self.assertIn("Working directory: /repo", prompt)
         self.assertIn("Troubleshooting notebook: /repo/docs/错题本.md", prompt)
+        self.assertIn("Tool result directory: /results", prompt)
         self.assertIn("append a concise Chinese entry", prompt)
         self.assertIn("Mode: test-only", prompt)
         self.assertEqual(
-            buildSystemPrompt("/repo", "TestOS", "Mode: test-only", "test-model"),
+            buildSystemPrompt(
+                "/repo",
+                "TestOS",
+                "Mode: test-only",
+                "test-model",
+                tool_result_directory="/results",
+            ),
             prompt,
         )
 
@@ -377,6 +396,101 @@ class ContextManagerTest(unittest.TestCase):
 
         self.assertEqual(context.tool_schemas(), tools.schemas())
         self.assertFalse(hasattr(context, "execute_tool"))
+
+    def test_context_stores_large_tool_result_with_path_and_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = ContextManager(
+                tool_result_directory=Path(directory) / "tool-results"
+            )
+            call = ToolCall("call/1", "Grep", {})
+            content = json.dumps(
+                {
+                    "output": "result-start\n" + "x" * (120 * 1024) + "\nresult-end",
+                    "exit_code": 0,
+                }
+            )
+
+            compacted = context.compact_tool_results(
+                [(call, ToolResult(content, is_error=True))]
+            )
+
+            result = compacted[0][1]
+            self.assertTrue(result.is_error)
+            self.assertIn("Tool result stored on disk.", result.content)
+            self.assertIn("Tool: Grep", result.content)
+            self.assertIn("Call ID: call/1", result.content)
+            self.assertIn("result-start", result.content)
+            self.assertIn("result-end", result.content)
+            path = Path(
+                next(
+                    line.removeprefix("Path: ")
+                    for line in result.content.splitlines()
+                    if line.startswith("Path: ")
+                )
+            )
+            self.assertTrue(path.is_file())
+            self.assertIn("__Grep__call_1.txt", path.name)
+            lines = path.read_text(encoding="utf-8").splitlines()
+            metadata = json.loads(lines[0])
+            self.assertTrue(metadata["is_error"])
+            self.assertEqual(metadata["format"], "chunked-jsonl")
+            self.assertEqual(
+                "".join(json.loads(line)["content"] for line in lines[1:]),
+                content,
+            )
+            read = create_read_file_tool(Path(directory)).handler(
+                path=str(path),
+                offset=1,
+                limit=2000,
+            )
+            self.assertFalse(read.is_error)
+            self.assertIn('"chunk": 1', read.content)
+
+            context.close()
+            self.assertFalse(path.exists())
+
+    def test_context_spills_only_enough_parallel_results_to_fit_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = ContextManager(
+                tool_result_directory=Path(directory) / "tool-results"
+            )
+            calls = [
+                ToolCall("call_1", "First", {}),
+                ToolCall("call_2", "Second", {}),
+                ToolCall("call_3", "Third", {}),
+            ]
+            results = [
+                (calls[0], ToolResult("a" * (60 * 1024))),
+                (calls[1], ToolResult("b" * (50 * 1024))),
+                (calls[2], ToolResult("c" * (2 * 1024))),
+            ]
+
+            compacted = context.compact_tool_results(results)
+
+            self.assertIn("stored on disk", compacted[0][1].content)
+            self.assertEqual(compacted[1], results[1])
+            self.assertEqual(compacted[2], results[2])
+            self.assertLessEqual(
+                sum(
+                    len(result.to_model_output().encode("utf-8"))
+                    for _, result in compacted
+                ),
+                100 * 1024,
+            )
+            context.close()
+
+    def test_context_keeps_full_result_when_disk_storage_fails(self) -> None:
+        context = ContextManager(tool_result_directory="/unused")
+        original = (ToolCall("call_1", "Grep", {}), ToolResult("x" * (81 * 1024)))
+
+        with patch.object(
+            context,
+            "_result_session_directory",
+            side_effect=OSError("disk full"),
+        ):
+            compacted = context.compact_tool_results([original])
+
+        self.assertEqual(compacted, [original])
 
     def test_streaming_assistant_message_can_be_appended_and_completed(self) -> None:
         context = ContextManager()
@@ -766,7 +880,7 @@ class AgentTest(unittest.TestCase):
         )
         self.assertEqual(calls[0][1], tool_manager.schemas())
 
-    def test_stream_batches_tool_calls_and_emits_results_as_completed(self) -> None:
+    def test_stream_batches_tool_calls_and_restores_original_result_order(self) -> None:
         first = ToolCall("call_1", "first", {})
         second = ToolCall("call_2", "second", {})
         batches = []
@@ -804,8 +918,8 @@ class AgentTest(unittest.TestCase):
             [
                 ToolCallEvent(first),
                 ToolCallEvent(second),
-                ToolResultEvent("call_2", "second", "second result"),
                 ToolResultEvent("call_1", "first", "first result"),
+                ToolResultEvent("call_2", "second", "second result"),
                 UsageEvent(4),
                 TurnCompleteEvent(1),
                 ConversationEvent("done"),
@@ -822,12 +936,12 @@ class AgentTest(unittest.TestCase):
                 Message.tool_call("call_1", "first", {}),
                 Message.tool_call("call_2", "second", {}),
                 Message.tool_result(
-                    "call_2",
-                    '{"content": "second result", "isError": false}',
-                ),
-                Message.tool_result(
                     "call_1",
                     '{"content": "first result", "isError": false}',
+                ),
+                Message.tool_result(
+                    "call_2",
+                    '{"content": "second result", "isError": false}',
                 ),
                 Message("assistant", "done", status="completed", token_usage=1),
             ],

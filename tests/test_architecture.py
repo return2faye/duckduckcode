@@ -11,6 +11,10 @@ SOURCE_ROOT = Path(__file__).parents[1] / "src" / "duckduckcode"
 EXPECTED_MODULES = {
     "__init__.py",
     "config.py",
+    "eval/__init__.py",
+    "eval/__main__.py",
+    "eval/runner.py",
+    "eval/schema.py",
     "main.py",
     "core/__init__.py",
     "core/agent.py",
@@ -56,6 +60,7 @@ LEGACY_MODULES = {
 ALLOWED_DEPENDENCIES = {
     "root": set(),
     "config": {"core"},
+    "eval": {"config", "core", "eval", "main", "tools"},
     "main": {"config", "core", "interfaces", "permissions", "providers", "tools"},
     "core": {"core", "permissions", "tools"},
     "interfaces": {"core", "interfaces"},

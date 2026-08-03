@@ -15,6 +15,11 @@ Defaults:
 
 - `OPENAI_MODEL=o4-mini`
 - `OPENAI_REASONING_EFFORT=low`
+- `LANGSMITH_TRACING=false`
+- `OPENAI_JUDGE_MODEL=gpt-5.6-terra`
+
+Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` to trace Agent and Judge
+Responses API calls to the `LANGSMITH_PROJECT` project.
 
 ## Chat
 
@@ -32,6 +37,7 @@ DuckDuckCode starts the TUI by default. The upper area shows the duck banner, ve
 - `config.py`: startup configuration loaded from environment variables
 - `context.py`: `Message` object, system prompt, abstraction, tool schemas, and in-memory `ContextManager`
 - `event.py`: internal streaming events such as `ConversationEvent`, `ToolCallEvent`, and `ErrorEvent`
+- `eval/`: benchmark loading, isolated execution, local result storage, and judging
 - `openai_client.py`: OpenAI Responses API implementation
 - `serialize.py`: provider-specific message serializers and response deserializers
 - `stream.py`: OpenAI SSE event parser and event handler
@@ -47,3 +53,32 @@ The default model is `o4-mini`, a reasoning model. Reasoning effort defaults to 
 `OpenAIClient.stream()` uses Responses API SSE streaming and yields internal stream events. The parser currently handles text deltas, function tool calls, errors, and completion.
 
 During streaming, `Agent.stream()` creates an empty assistant message, appends text deltas into it, then marks it `completed` or `error`. `Message.token_usage` records returned usage for now; token accounting can be added later.
+
+## Local evaluations
+
+```bash
+uv run duckduckcode-eval
+uv run duckduckcode-eval --case single-file-bug
+uv run duckduckcode-eval --bench path/to/bench.jsonl
+```
+
+Benches come from JSON/JSONL files under `evals/benches` by default; `--bench`
+accepts another file or directory and may be repeated. Repo fixtures live outside
+the case record and are materialized at the declared content hash or Git commit.
+Runs use isolated temporary workspaces and append results to
+`.duckduckcode/evals.sqlite3`; each case makes one independent Judge API call.
+Network tool requests are denied during evaluation. See
+[evals/README.md](evals/README.md) for the bench contract.
+
+SQLite stores local evaluation state only:
+
+- `cases` is the synchronized benchmark catalog: normalized case JSON, source
+  hash, and active/inactive status. Missing cases become inactive; history is not
+  deleted.
+- `evaluations` is append-only run history: batch and case IDs, models, completion
+  status, score and reason, final answer, workspace diff, tool events, required
+  test results, validation errors, token usage, duration, compaction count, and
+  runtime errors.
+
+Bench JSON/JSONL files and repo fixtures remain regular files. Each temporary
+workspace is removed after its case finishes and is not stored in SQLite.

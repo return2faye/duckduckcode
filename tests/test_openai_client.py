@@ -78,6 +78,53 @@ class OpenAIClientTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "OPENAI_API_KEY"):
                 OpenAIClient()
 
+    def test_wraps_and_flushes_only_when_tracing_is_enabled(self) -> None:
+        raw = type(
+            "RawClient", (), {"close": lambda self: setattr(self, "closed", True)}
+        )()
+        traced = type(
+            "TracedClient", (), {"close": lambda self: setattr(self, "closed", True)}
+        )()
+        langsmith = type(
+            "LangSmith", (), {"flush": lambda self: setattr(self, "flushed", True)}
+        )()
+        with (
+            patch("duckduckcode.providers.openai.client.OpenAI", return_value=raw),
+            patch(
+                "duckduckcode.providers.openai.client.LangSmithClient",
+                return_value=langsmith,
+            ),
+            patch(
+                "duckduckcode.providers.openai.client.wrap_openai",
+                return_value=traced,
+            ) as wrap,
+        ):
+            client = OpenAIClient(
+                api_key="openai-key",
+                langsmith_tracing=True,
+                langsmith_api_key="langsmith-key",
+                langsmith_project="project",
+            )
+            client.close()
+
+        self.assertTrue(traced.closed)
+        self.assertTrue(langsmith.flushed)
+        self.assertEqual(
+            wrap.call_args.kwargs["tracing_extra"]["project_name"], "project"
+        )
+        self.assertTrue(wrap.call_args.kwargs["tracing_extra"]["enabled"])
+
+        with (
+            patch("duckduckcode.providers.openai.client.OpenAI", return_value=raw),
+            patch("duckduckcode.providers.openai.client.wrap_openai") as disabled_wrap,
+        ):
+            OpenAIClient(api_key="openai-key")
+        disabled_wrap.assert_not_called()
+
+    def test_tracing_requires_langsmith_key(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "LANGSMITH_API_KEY"):
+            OpenAIClient(api_key="openai-key", langsmith_tracing=True)
+
     def test_stream_uses_injected_serializer(self) -> None:
         fake_responses = FakeResponses()
         serializer = type(
@@ -430,6 +477,18 @@ class ContextManagerTest(unittest.TestCase):
         )
         small_context.add_user("x" * 4_000)
         self.assertTrue(small_context.should_compact())
+
+    def test_context_accepts_bench_compaction_thresholds(self) -> None:
+        context = ContextManager(
+            context_window_tokens=32_000,
+            compaction_trigger_tokens=24_000,
+            compaction_target_tokens=10_000,
+        )
+
+        self.assertEqual(context.context_window_tokens, 32_000)
+        self.assertEqual(context.auto_compact_tokens, 24_000)
+        self.assertEqual(context.compaction_target_tokens, 10_000)
+        self.assertEqual(context.compaction_safety_tokens, 0)
 
     def test_adds_user_and_assistant_messages(self) -> None:
         context = ContextManager(system_prompt="system prompt")

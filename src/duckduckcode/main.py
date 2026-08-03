@@ -55,7 +55,15 @@ def main() -> None:
             agent.close()
 
 
-def build_agent(config: Config, workspace: Path) -> Agent:
+def build_agent(
+    config: Config,
+    workspace: Path,
+    *,
+    max_iterations: int | None = None,
+    context_window_tokens: int | None = None,
+    compaction_trigger_tokens: int | None = None,
+    compaction_target_tokens: int | None = None,
+) -> Agent:
     path_sandbox = PathSandbox(workspace)
     try:
         policy: RulePolicy | None = None
@@ -82,7 +90,13 @@ def build_agent(config: Config, workspace: Path) -> Agent:
             },
         )
         return Agent(
-            OpenAIClient(api_key=config.openai_api_key, model=config.openai_model),
+            OpenAIClient(
+                api_key=config.openai_api_key,
+                model=config.openai_model,
+                langsmith_tracing=config.langsmith_tracing,
+                langsmith_api_key=config.langsmith_api_key,
+                langsmith_project=config.langsmith_project,
+            ),
             ContextManager(
                 system_prompt=build_system_prompt(
                     workspace,
@@ -92,9 +106,13 @@ def build_agent(config: Config, workspace: Path) -> Agent:
                 ),
                 reasoning=config.reasoning,
                 tool_result_directory=path_sandbox.tool_result_directory,
-                context_window_tokens=config.context_window_tokens,
+                context_window_tokens=context_window_tokens
+                or config.context_window_tokens,
+                compaction_trigger_tokens=compaction_trigger_tokens,
+                compaction_target_tokens=compaction_target_tokens,
             ),
             tools,
+            max_iterations=max_iterations or 50,
             permission_checker=PermissionChecker(
                 [check_bash_blacklist, path_sandbox],
                 policy,

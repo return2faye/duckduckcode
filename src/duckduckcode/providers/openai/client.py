@@ -4,6 +4,8 @@ from collections.abc import Iterator
 from typing import Any
 
 from openai import OpenAI
+from langsmith import Client as LangSmithClient
+from langsmith.wrappers import wrap_openai
 
 from ...core.client import Client, ClientResponse
 from ...core.context import Message, ReasoningConfig
@@ -25,6 +27,9 @@ class OpenAIClient(Client):
         serializer: MessageSerializer | None = None,
         deserializer: MessageDeserializer | None = None,
         event_handler: OpenAIStreamEventHandler | None = None,
+        langsmith_tracing: bool = False,
+        langsmith_api_key: str | None = None,
+        langsmith_project: str = "duckduckcode",
     ) -> None:
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required")
@@ -33,7 +38,22 @@ class OpenAIClient(Client):
         self.serializer = serializer or OpenAIResponsesSerializer()
         self.deserializer = deserializer or OpenAIResponsesDeserializer()
         self.event_handler = event_handler or OpenAIStreamEventHandler()
+        self._langsmith_client = None
         self._client = OpenAI(api_key=api_key)
+        if langsmith_tracing:
+            if not langsmith_api_key:
+                raise RuntimeError(
+                    "LANGSMITH_API_KEY is required when LANGSMITH_TRACING is true"
+                )
+            self._langsmith_client = LangSmithClient(api_key=langsmith_api_key)
+            self._client = wrap_openai(
+                self._client,
+                tracing_extra={
+                    "client": self._langsmith_client,
+                    "project_name": langsmith_project,
+                    "enabled": True,
+                },
+            )
 
     def stream(
         self,
@@ -56,3 +76,10 @@ class OpenAIClient(Client):
             **payload,
         )
         return self.event_handler.handle(events)
+
+    def close(self) -> None:
+        try:
+            self._client.close()
+        finally:
+            if self._langsmith_client is not None:
+                self._langsmith_client.flush()

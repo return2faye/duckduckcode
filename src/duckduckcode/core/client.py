@@ -22,6 +22,9 @@ class ClientResponse:
 
 class Client(ABC):
 
+    def close(self) -> None:
+        pass
+
     @abstractmethod
     def stream(
         self,

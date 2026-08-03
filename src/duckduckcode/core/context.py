@@ -79,9 +79,19 @@ class ContextManager:
         tool_schemas: list[dict[str, Any]] | None = None,
         tool_result_directory: str | Path | None = None,
         context_window_tokens: int = DEFAULT_CONTEXT_WINDOW_TOKENS,
+        compaction_trigger_tokens: int | None = None,
+        compaction_target_tokens: int | None = None,
     ) -> None:
-        if context_window_tokens <= COMPACTION_OUTPUT_TOKENS + CONTEXT_SAFETY_TOKENS:
+        if context_window_tokens <= CONTEXT_SAFETY_TOKENS:
             raise ValueError("context_window_tokens is too small for compaction")
+        trigger = compaction_trigger_tokens or (
+            context_window_tokens - COMPACTION_OUTPUT_TOKENS - CONTEXT_SAFETY_TOKENS
+        )
+        target = compaction_target_tokens or min(RECENT_CONTEXT_TOKENS, trigger - 1)
+        if not 0 < target < trigger < context_window_tokens:
+            raise ValueError(
+                "compaction_target_tokens must be below the trigger and context window"
+            )
         self._messages: list[Message] = []
         self.system_prompt = system_prompt or build_system_prompt(
             workspace,
@@ -98,8 +108,10 @@ class ContextManager:
         )
         self._tool_result_session: Path | None = None
         self.context_window_tokens = context_window_tokens
-        self.auto_compact_tokens = (
-            context_window_tokens - COMPACTION_OUTPUT_TOKENS - CONTEXT_SAFETY_TOKENS
+        self.auto_compact_tokens = trigger
+        self.compaction_target_tokens = target
+        self.compaction_safety_tokens = (
+            0 if compaction_trigger_tokens is not None else CONTEXT_SAFETY_TOKENS
         )
         self.mode: Literal["default", "plan"] = "default"
 
@@ -279,7 +291,7 @@ class ContextManager:
             turn_size = _estimate_tokens(
                 [_message_record(message) for message in self._messages[start:cutoff]]
             )
-            if retained + turn_size > RECENT_CONTEXT_TOKENS:
+            if retained + turn_size > self.compaction_target_tokens:
                 break
             cutoff = start
             retained += turn_size

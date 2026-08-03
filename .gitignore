@@ -8,6 +8,7 @@ __pycache__/
 .superpowers/
 /.duckduckcode/permissions.local.yaml
 /.duckduckcode/plan.md
+/.duckduckcode/evals.sqlite3
 /docs/
 dist/
 *.egg-info/

@@ -14,6 +14,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.openai_model, "o4-mini")
         self.assertEqual(config.reasoning, ReasoningConfig("low"))
         self.assertEqual(config.context_window_tokens, 200_000)
+        self.assertFalse(config.langsmith_tracing)
+        self.assertIsNone(config.langsmith_api_key)
+        self.assertEqual(config.langsmith_project, "duckduckcode")
+        self.assertEqual(config.openai_judge_model, "gpt-5.6-terra")
 
     def test_environment_overrides_defaults(self) -> None:
         config = Config.from_env(
@@ -22,12 +26,29 @@ class ConfigTest(unittest.TestCase):
                 "OPENAI_MODEL": "test-model",
                 "OPENAI_REASONING_EFFORT": "medium",
                 "CONTEXT_WINDOW_TOKENS": "180000",
+                "LANGSMITH_TRACING": "true",
+                "LANGSMITH_API_KEY": "langsmith-key",
+                "LANGSMITH_PROJECT": "test-project",
+                "OPENAI_JUDGE_MODEL": "judge-model",
             }
         )
 
         self.assertEqual(config.openai_model, "test-model")
         self.assertEqual(config.reasoning, ReasoningConfig("medium"))
         self.assertEqual(config.context_window_tokens, 180_000)
+        self.assertTrue(config.langsmith_tracing)
+        self.assertEqual(config.langsmith_api_key, "langsmith-key")
+        self.assertEqual(config.langsmith_project, "test-project")
+        self.assertEqual(config.openai_judge_model, "judge-model")
+
+    def test_tracing_requires_key_and_boolean_setting(self) -> None:
+        for env in (
+            {"OPENAI_API_KEY": "key", "LANGSMITH_TRACING": "true"},
+            {"OPENAI_API_KEY": "key", "LANGSMITH_TRACING": "sometimes"},
+        ):
+            with self.subTest(env=env):
+                with self.assertRaisesRegex(RuntimeError, "LANGSMITH"):
+                    Config.from_env(env)
 
     def test_rejects_invalid_context_window(self) -> None:
         for value in ("large", "33000"):

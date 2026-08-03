@@ -7,7 +7,6 @@ from typing import Literal
 from .client import Client
 from .context import (
     COMPACTION_OUTPUT_TOKENS,
-    CONTEXT_SAFETY_TOKENS,
     ContextManager,
     Message,
 )
@@ -299,7 +298,9 @@ class Agent:
         input_tokens = self.context.estimate_request_tokens(messages, tools)
         max_output_tokens = min(
             COMPACTION_OUTPUT_TOKENS,
-            self.context.context_window_tokens - input_tokens - CONTEXT_SAFETY_TOKENS,
+            self.context.context_window_tokens
+            - input_tokens
+            - self.context.compaction_safety_tokens,
         )
         if max_output_tokens < 1:
             self._compaction_circuit_open = True
@@ -320,7 +321,7 @@ class Agent:
                 COMPACTION_OUTPUT_TOKENS,
                 self.context.context_window_tokens
                 - input_tokens
-                - CONTEXT_SAFETY_TOKENS,
+                - self.context.compaction_safety_tokens,
             )
             if max_output_tokens < 1:
                 last_error = RuntimeError(
@@ -483,9 +484,14 @@ class Agent:
 
     def close(self) -> None:
         try:
-            self.context.close()
+            close = getattr(self.client, "close", None)
+            if callable(close):
+                close()
         finally:
-            self.permission_checker.close()
+            try:
+                self.context.close()
+            finally:
+                self.permission_checker.close()
 
 
 def _extract_summary(output: str) -> str:

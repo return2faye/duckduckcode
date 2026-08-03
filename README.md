@@ -78,7 +78,8 @@ compaction count differs from `metadata.expected_compactions`; the Judge also
 receives each compacted summary and grades whether it kept the required facts
 without promoting irrelevant padding. `duckduckcode-eval-report` renders the
 latest batch as `.duckduckcode/eval-reports/eval-report.html`, including token usage,
-compaction before/after sizes and summaries, tool calls, tests, scores, and diffs.
+compaction before/after sizes and summaries, complete tool arguments/results/errors,
+permission decisions, tests, scores, and diffs. The Judge receives the same tool trace.
 
 SQLite stores local evaluation state only:
 

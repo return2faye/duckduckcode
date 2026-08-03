@@ -202,6 +202,7 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
         "changed_files": changed_files,
         "required_test_results": test_results,
         "validation_errors": validation_errors,
+        "tool_events": tool_events,
         "tool_errors": [
             event
             for event in tool_events
@@ -445,7 +446,9 @@ def _judge(config: Config, evidence: dict[str, Any]) -> JudgeResult:
                 "the supplied evidence and explain the decisive reason concisely. "
                 "For compaction cases, verify the captured summaries preserve "
                 "critical facts, newest instructions, and pending actions while "
-                "discarding irrelevant detail."
+                "discarding irrelevant detail. Use the complete tool trace, "
+                "including call arguments, results, errors, and permission "
+                "decisions, to verify what the agent actually inspected and did."
             ),
             input=json.dumps(evidence, ensure_ascii=False),
             text={

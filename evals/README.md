@@ -42,6 +42,8 @@ Required tests run without network access inside the existing OS sandbox.
 `expected_compactions` is enforced exactly. Completed compaction events include
 their before/after token estimates and resulting summary so the Judge can assess
 fact retention, instruction precedence, and unresolved work.
+Every tool call is also recorded with its arguments, result or error, and permission
+decision; the Judge and HTML report receive this complete trace.
 
 The repository includes four context cases under `evals/benches/context`:
 

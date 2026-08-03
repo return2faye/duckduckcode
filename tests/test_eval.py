@@ -290,6 +290,12 @@ class EvalRunTest(unittest.TestCase):
         self.assertEqual(len(evidence[0]["final_answers"]), 2)
         self.assertEqual(evidence[0]["actual_compactions"], 2)
         self.assertEqual(evidence[0]["compaction_events"][0]["summary"], "kept summary")
+        self.assertEqual(
+            evidence[0]["tool_events"][0]["arguments"]["command"],
+            "python source.py",
+        )
+        self.assertEqual(evidence[0]["tool_events"][2]["content"], "ok")
+        self.assertTrue(evidence[0]["tool_errors"][0]["is_error"])
         self.assertIn("1/1 passed", output.getvalue())
 
     def test_incomplete_and_file_violation_force_failure_and_judge_error_is_saved(
@@ -422,7 +428,25 @@ class ReportTest(unittest.TestCase):
                         "reason": "looks <good>",
                         "final_answer": "done",
                         "workspace_diff": "+new",
-                        "tool_events": '[{"turn": 2, "type": "tool_call", "name": "Bash"}]',
+                        "tool_events": json.dumps(
+                            [
+                                {
+                                    "turn": 2,
+                                    "type": "tool_call",
+                                    "call_id": "call-1",
+                                    "name": "Bash",
+                                    "arguments": {"command": "printf '<ok>'"},
+                                },
+                                {
+                                    "turn": 2,
+                                    "type": "tool_result",
+                                    "call_id": "call-1",
+                                    "name": "Bash",
+                                    "content": "<ok>",
+                                    "is_error": False,
+                                },
+                            ]
+                        ),
                         "token_usage": 12,
                         "judge_token_usage": 3,
                         "duration_seconds": 1.5,
@@ -444,6 +468,14 @@ class ReportTest(unittest.TestCase):
         self.assertIn("1,200 → 400 estimated tokens · saved 800 (66.7%)", rendered)
         self.assertIn("retain &lt;fact&gt;", rendered)
         self.assertNotIn("retain <fact>", rendered)
+        self.assertIn("Tool trace (1 calls)", rendered)
+        self.assertIn(
+            '<details class="event"><summary><b>turn 2 · tool_result · Bash</b>',
+            rendered,
+        )
+        self.assertIn("printf &#x27;&lt;ok&gt;&#x27;", rendered)
+        self.assertIn("&lt;ok&gt;", rendered)
+        self.assertNotIn("printf '<ok>'", rendered)
 
 
 if __name__ == "__main__":

@@ -62,7 +62,7 @@ main{{max-width:1100px;margin:auto;padding:32px 20px}}h1,h2,p{{margin-top:0}}.mu
 .metric,.case{{background:var(--panel);border:1px solid #28324f;border-radius:12px;padding:16px}}.metric strong{{display:block;font-size:22px}}
 .case{{margin:16px 0}}.head{{display:flex;justify-content:space-between;gap:16px;align-items:start}}.pass{{color:var(--ok)}}.fail{{color:var(--bad)}}
 .bar{{height:7px;background:#27304a;border-radius:9px;overflow:hidden;margin:8px 0 14px}}.bar i{{display:block;height:100%;background:var(--accent)}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}}.compact,.event{{border-left:3px solid var(--accent);padding:8px 10px;margin:8px 0;background:#10162a}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}}.compact,.event{{border-left:3px solid var(--accent);padding:8px 10px;margin:8px 0;background:#10162a}}.event.error{{border-color:var(--bad)}}
 details{{margin-top:10px}}summary{{cursor:pointer;color:#b9c8ef}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#0d1325;padding:12px;border-radius:8px;max-height:420px;overflow:auto}}
 </style></head><body><main>
 <h1>DuckDuckCode evaluation</h1><p class="muted">batch {escape(batch_id)}</p>
@@ -119,13 +119,35 @@ def _compaction_event_html(event: dict[str, Any]) -> str:
 def _events_html(events: list[dict[str, Any]]) -> str:
     if not events:
         return ""
-    rendered = "".join(
-        f'<div class="event">turn {event.get("turn", "?")} · '
-        f'{escape(str(event.get("type", "event")))} · '
-        f'{escape(str(event.get("name", event.get("decision", ""))))}</div>'
-        for event in events
+    rendered = "".join(_tool_event_html(event) for event in events)
+    calls = sum(event.get("type") == "tool_call" for event in events)
+    return f"<details><summary>Tool trace ({calls} calls)</summary>{rendered}</details>"
+
+
+def _tool_event_html(event: dict[str, Any]) -> str:
+    event_type = str(event.get("type", "event"))
+    name = event.get("name", "")
+    status = "error" if event.get("is_error") else str(event.get("decision", ""))
+    detail = {
+        key: event[key] for key in ("call_id", "arguments", "content") if key in event
+    }
+    rendered_detail = (
+        f"<pre>{escape(json.dumps(detail, ensure_ascii=False, indent=2, default=str))}</pre>"
+        if detail
+        else ""
     )
-    return f"<details><summary>Tool calls ({len(events)})</summary>{rendered}</details>"
+    css = "event error" if event.get("is_error") else "event"
+    suffix = f" · {escape(status)}" if status else ""
+    label = (
+        f'turn {event.get("turn", "?")} · {escape(event_type)} · '
+        f"{escape(str(name))}{suffix}"
+    )
+    if event_type == "tool_result":
+        return (
+            f'<details class="{css}"><summary><b>{label}</b></summary>'
+            f"{rendered_detail}</details>"
+        )
+    return f'<div class="{css}"><b>{label}</b>{rendered_detail}</div>'
 
 
 def _details(title: str, value: Any) -> str:

@@ -9,6 +9,8 @@ __pycache__/
 /.duckduckcode/permissions.local.yaml
 /.duckduckcode/plan.md
 /.duckduckcode/evals.sqlite3
+/.duckduckcode/eval-report.html
+/.duckduckcode/eval-reports/
 /docs/
 dist/
 *.egg-info/

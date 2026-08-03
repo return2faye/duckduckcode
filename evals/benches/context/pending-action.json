@@ -1,0 +1,38 @@
+{
+  "inputs": {
+    "task": "This is a pending-action benchmark. Do not edit files yet. Inspect release.py and retain this unresolved task: implement select_release(records) by ignoring every record where draft is true, selecting the remaining record with highest integer priority, breaking priority ties by lexicographically smallest id, returning that id, and returning None when no stable record exists. Reply only that the task remains pending. The following audit trail is irrelevant padding: AUD-001 closed green 14; AUD-002 closed blue 27; AUD-003 closed red 35; AUD-004 closed gold 48; AUD-005 closed gray 56; AUD-006 closed teal 69; AUD-007 closed pink 77; AUD-008 closed navy 80; AUD-009 closed lime 92; AUD-010 closed cyan 03; AUD-011 closed green 15; AUD-012 closed blue 28; AUD-013 closed red 36; AUD-014 closed gold 49; AUD-015 closed gray 57; AUD-016 closed teal 60; AUD-017 closed pink 78; AUD-018 closed navy 81; AUD-019 closed lime 93; AUD-020 closed cyan 04; AUD-021 closed green 16; AUD-022 closed blue 29; AUD-023 closed red 37; AUD-024 closed gold 40; AUD-025 closed gray 58; AUD-026 closed teal 61; AUD-027 closed pink 79; AUD-028 closed navy 82; AUD-029 closed lime 94; AUD-030 closed cyan 05; AUD-031 closed green 17; AUD-032 closed blue 20; AUD-033 closed red 38; AUD-034 closed gold 41; AUD-035 closed gray 59; AUD-036 closed teal 62; AUD-037 closed pink 70; AUD-038 closed navy 83; AUD-039 closed lime 95; AUD-040 closed cyan 06; AUD-041 closed green 18; AUD-042 closed blue 21; AUD-043 closed red 39; AUD-044 closed gold 42; AUD-045 closed gray 50; AUD-046 closed teal 63; AUD-047 closed pink 71; AUD-048 closed navy 84; AUD-049 closed lime 96; AUD-050 closed cyan 07; AUD-051 closed green 19; AUD-052 closed blue 22; AUD-053 closed red 30; AUD-054 closed gold 43; AUD-055 closed gray 51; AUD-056 closed teal 64; AUD-057 closed pink 72; AUD-058 closed navy 85; AUD-059 closed lime 97; AUD-060 closed cyan 08.",
+    "repo_fixture": "../../fixtures/context-pending-action",
+    "base_commit": "1b377de5c361bb5e6dd0644459770b5eec4131499c3c939ebe159abd1a61d8ef",
+    "conversation_script": [
+      "Resume and complete the unresolved select_release task now, then run python -m unittest test_release.py."
+    ],
+    "agent_config": {
+      "max_iterations": 30,
+      "context_window": 16000,
+      "compaction_trigger": 2500,
+      "compaction_target": 300
+    }
+  },
+  "outputs": {
+    "required_tests": ["python -m unittest test_release.py"],
+    "allowed_files": ["release.py"],
+    "forbidden_files": ["test_release.py"],
+    "critical_facts": [
+      "The compacted summary marks the implementation as pending rather than completed.",
+      "The compacted summary retains draft filtering, highest priority selection, lexicographic tie-breaking, and the None fallback.",
+      "Closed audit entries are not treated as active work."
+    ],
+    "required_actions": [
+      "Resume the unresolved implementation after compaction.",
+      "Run python -m unittest test_release.py."
+    ]
+  },
+  "metadata": {
+    "id": "context-pending-action",
+    "suite": "context",
+    "category": "pending-work",
+    "difficulty": "medium",
+    "expected_compactions": 1,
+    "language": "python"
+  }
+}

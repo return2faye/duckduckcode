@@ -39,6 +39,24 @@ one case. Use `--bench PATH` to load downloaded bench files or directories.
 `conversation_script` is a list of later user turns sent to the same Agent after
 `task`. `allowed_files` and `forbidden_files` use shell-style path patterns.
 Required tests run without network access inside the existing OS sandbox.
+`expected_compactions` is enforced exactly. Completed compaction events include
+their before/after token estimates and resulting summary so the Judge can assess
+fact retention, instruction precedence, and unresolved work.
+
+The repository includes four context cases under `evals/benches/context`:
+
+- `context-compression-quality`: reduces a large noisy tool result while retaining
+  three authoritative facts.
+- `context-critical-facts`: retains an early numeric contract through compaction.
+- `context-latest-instruction`: preserves a newer rule across two compactions.
+- `context-pending-action`: keeps unresolved work pending and resumes it later.
+
+Run them and render the latest batch with:
+
+```bash
+uv run duckduckcode-eval --bench evals/benches/context
+uv run duckduckcode-eval-report
+```
 
 For a non-Git fixture directory, `base_commit` is the fixture tree SHA-256 used by
 the loader. For a local Git repository, it is a commit or ref exported with

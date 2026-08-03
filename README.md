@@ -60,6 +60,8 @@ During streaming, `Agent.stream()` creates an empty assistant message, appends t
 uv run duckduckcode-eval
 uv run duckduckcode-eval --case single-file-bug
 uv run duckduckcode-eval --bench path/to/bench.jsonl
+uv run duckduckcode-eval --bench evals/benches/context
+uv run duckduckcode-eval-report
 ```
 
 Benches come from JSON/JSONL files under `evals/benches` by default; `--bench`
@@ -70,6 +72,14 @@ Runs use isolated temporary workspaces and append results to
 Network tool requests are denied during evaluation. See
 [evals/README.md](evals/README.md) for the bench contract.
 
+The context suite checks critical-fact retention, latest-instruction precedence,
+and pending-work retention. A run fails deterministically when its observed
+compaction count differs from `metadata.expected_compactions`; the Judge also
+receives each compacted summary and grades whether it kept the required facts
+without promoting irrelevant padding. `duckduckcode-eval-report` renders the
+latest batch as `.duckduckcode/eval-reports/eval-report.html`, including token usage,
+compaction before/after sizes and summaries, tool calls, tests, scores, and diffs.
+
 SQLite stores local evaluation state only:
 
 - `cases` is the synchronized benchmark catalog: normalized case JSON, source
@@ -77,8 +87,13 @@ SQLite stores local evaluation state only:
   deleted.
 - `evaluations` is append-only run history: batch and case IDs, models, completion
   status, score and reason, final answer, workspace diff, tool events, required
-  test results, validation errors, token usage, duration, compaction count, and
-  runtime errors.
+  test results, validation errors, token usage, duration, compaction events and
+  summaries, and runtime errors.
 
 Bench JSON/JSONL files and repo fixtures remain regular files. Each temporary
 workspace is removed after its case finishes and is not stored in SQLite.
+
+SQLite is used because batch/case filtering, append-only history, schema migration,
+and regenerating reports are needed together; Python provides it in the standard
+library and writes one local transactional file. It is not the benchmark source of
+truth. For a disposable single-run result, JSONL would be enough.

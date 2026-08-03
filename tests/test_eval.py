@@ -12,6 +12,7 @@ from duckduckcode.config import Config
 from duckduckcode import eval as eval_module
 from duckduckcode.eval import JudgeResult, load_benches, run_evaluations, sync_cases
 from duckduckcode.eval import runner as runner_module
+from duckduckcode.eval.report import DEFAULT_REPORT, generate_report
 from duckduckcode.core.event import (
     ContextCompactionEvent,
     ConversationEvent,
@@ -175,6 +176,7 @@ class EvalRunTest(unittest.TestCase):
         class FakeAgent:
             def __init__(self, workspace: Path) -> None:
                 self.workspace = workspace
+                self.context = type("Context", (), {"abstraction": "kept summary"})()
 
             def stream(self, prompt):
                 self.workspace.joinpath("source.py").write_text(
@@ -259,7 +261,8 @@ class EvalRunTest(unittest.TestCase):
                 sqlite3.connect(database)
                 .execute(
                     "SELECT status, score, passed, final_answer, workspace_diff, "
-                    "tool_events, token_usage, judge_token_usage, compactions "
+                    "tool_events, token_usage, judge_token_usage, compactions, "
+                    "compaction_events "
                     "FROM evaluations ORDER BY id"
                 )
                 .fetchall()
@@ -282,9 +285,11 @@ class EvalRunTest(unittest.TestCase):
         self.assertIn("-old", rows[0][4])
         self.assertIn("+new", rows[0][4])
         self.assertNotIn("ignored.txt", rows[0][4])
-        self.assertEqual(rows[0][6:], (14, 2, 2))
+        self.assertEqual(rows[0][6:9], (14, 2, 2))
+        self.assertEqual(len(json.loads(rows[0][9])), 2)
         self.assertEqual(len(evidence[0]["final_answers"]), 2)
         self.assertEqual(evidence[0]["actual_compactions"], 2)
+        self.assertEqual(evidence[0]["compaction_events"][0]["summary"], "kept summary")
         self.assertIn("1/1 passed", output.getvalue())
 
     def test_incomplete_and_file_violation_force_failure_and_judge_error_is_saved(
@@ -347,6 +352,7 @@ class EvalRunTest(unittest.TestCase):
 
         self.assertEqual(rows[0][:3], ("agent_error", 4, 0))
         self.assertIn("Forbidden file changed", rows[0][3])
+        self.assertIn("Expected 2 compactions, observed 0", rows[0][3])
         self.assertEqual(rows[1][:3], ("judge_error", None, 0))
         self.assertIn("bad JSON", rows[1][4])
 
@@ -389,6 +395,55 @@ class JudgeTest(unittest.TestCase):
         with patch.object(runner_module, "OpenAI", return_value=client):
             with self.assertRaisesRegex(RuntimeError, "0 to 4"):
                 runner_module._judge(Config("key"), {})
+
+
+class ReportTest(unittest.TestCase):
+    def test_renders_latest_batch_with_compaction_and_escaped_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "fixture"
+            fixture.mkdir()
+            fixture.joinpath("source.py").write_text("old\n", encoding="utf-8")
+            bench = root / "bench.json"
+            bench.write_text(json.dumps(_bench_record(fixture)), encoding="utf-8")
+            database = root / "evals.sqlite3"
+            with sqlite3.connect(database) as connection:
+                sync_cases(connection, load_benches(bench))
+                runner_module._save_evaluation(
+                    connection,
+                    {
+                        "batch_id": "batch-1",
+                        "case_id": "case-1",
+                        "agent_model": "agent",
+                        "judge_model": "judge",
+                        "status": "completed",
+                        "score": 4,
+                        "passed": 1,
+                        "reason": "looks <good>",
+                        "final_answer": "done",
+                        "workspace_diff": "+new",
+                        "tool_events": '[{"turn": 2, "type": "tool_call", "name": "Bash"}]',
+                        "token_usage": 12,
+                        "judge_token_usage": 3,
+                        "duration_seconds": 1.5,
+                        "error": "",
+                        "created_at": "2026-08-03T00:00:00+00:00",
+                        "test_results": "[]",
+                        "validation_errors": "[]",
+                        "compactions": 1,
+                        "compaction_events": '[{"turn": 2, "status": "completed", "before_tokens": 1200, "after_tokens": 400, "summary": "retain <fact>"}]',
+                    },
+                )
+            report = generate_report(database, root / "report.html")
+            rendered = report.read_text(encoding="utf-8")
+
+        self.assertIn("case-1", rendered)
+        self.assertEqual(
+            DEFAULT_REPORT, Path(".duckduckcode/eval-reports/eval-report.html")
+        )
+        self.assertIn("1,200 → 400 estimated tokens · saved 800 (66.7%)", rendered)
+        self.assertIn("retain &lt;fact&gt;", rendered)
+        self.assertNotIn("retain <fact>", rendered)
 
 
 if __name__ == "__main__":

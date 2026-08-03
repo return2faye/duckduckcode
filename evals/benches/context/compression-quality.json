@@ -1,0 +1,40 @@
+{
+  "inputs": {
+    "task": "This is a compression-quality benchmark. Do not edit files on this turn. Run exactly `python archive.py` and consume its complete stdout. Do not inspect archive.py source as a substitute. Only output lines beginning with `AUTHORITATIVE` are requirements; every `NOISE` line and every `candidate_*` value is irrelevant and must not become a requirement. Retain all authoritative configuration facts for the next turn, then reply only that the archive was consumed and the implementation remains pending.",
+    "repo_fixture": "../../fixtures/context-compression-quality",
+    "base_commit": "39ed068f114c63cbe2415f187e5d8a3fd574d709824ecb52b7dbe3246492fe19",
+    "conversation_script": [
+      "Without rerunning archive.py or asking me to repeat it, implement build_config() from the authoritative facts retained by compression. Then run python -m unittest test_config_builder.py."
+    ],
+    "agent_config": {
+      "max_iterations": 30,
+      "context_window": 24000,
+      "compaction_trigger": 12000,
+      "compaction_target": 1000
+    }
+  },
+  "outputs": {
+    "required_tests": ["python -m unittest test_config_builder.py"],
+    "allowed_files": ["config_builder.py"],
+    "forbidden_files": ["archive.py", "test_config_builder.py"],
+    "critical_facts": [
+      "The compacted summary retains mode=strict.",
+      "The compacted summary retains retry_limit=4.",
+      "The compacted summary retains timeout_ms=2750.",
+      "The compacted summary discards NOISE records and candidate values rather than promoting them to requirements."
+    ],
+    "required_actions": [
+      "Run python archive.py on the first turn and consume the complete output.",
+      "Implement build_config without rerunning the archive after compaction.",
+      "Run python -m unittest test_config_builder.py."
+    ]
+  },
+  "metadata": {
+    "id": "context-compression-quality",
+    "suite": "context",
+    "category": "compression-quality",
+    "difficulty": "hard",
+    "expected_compactions": 1,
+    "language": "python"
+  }
+}

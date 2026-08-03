@@ -14,6 +14,7 @@ EXPECTED_MODULES = {
     "eval/__init__.py",
     "eval/__main__.py",
     "eval/runner.py",
+    "eval/report.py",
     "eval/schema.py",
     "main.py",
     "core/__init__.py",

@@ -1,0 +1,38 @@
+{
+  "inputs": {
+    "task": "This is a context-retention benchmark. Do not edit files yet. Inspect pricing.py and remember this authoritative contract for the next turn: shipping_cents accepts only positive integer weight_kg; local cost is 700 base cents plus 120 cents per kilogram; remote=True adds exactly 350 cents; invalid weights raise ValueError. Reply only that you are ready. The following archive identifiers are irrelevant padding, not requirements, and should be discarded during compaction: ARC-001 amber north 8Q2M; ARC-002 bronze west 1P7K; ARC-003 cobalt east 4R9T; ARC-004 denim south 6V3X; ARC-005 ember north 2H8N; ARC-006 frost west 5J1C; ARC-007 granite east 7L4B; ARC-008 harbor south 9D6F; ARC-009 indigo north 3S5A; ARC-010 juniper west 8W2E; ARC-011 kelp east 1N7G; ARC-012 linen south 4C9R; ARC-013 maple north 6B3V; ARC-014 nickel west 2F8H; ARC-015 ochre east 5X1J; ARC-016 pearl south 7A4L; ARC-017 quartz north 9E6D; ARC-018 reed west 3G5S; ARC-019 slate east 8R2W; ARC-020 timber south 1V7N; ARC-021 umber north 4H9C; ARC-022 velvet west 6J3B; ARC-023 willow east 2L8F; ARC-024 xylem south 5D1X; ARC-025 yarrow north 7S4A; ARC-026 zinc west 9W6E; ARC-027 alder east 3N5G; ARC-028 birch south 8C2R; ARC-029 cedar north 1B7V; ARC-030 dune west 4F9H; ARC-031 elm east 6X3J; ARC-032 fern south 2A8L; ARC-033 grove north 5E1D; ARC-034 heath west 7G4S; ARC-035 iris east 9R6W; ARC-036 jade south 3V5N; ARC-037 kiln north 8H2C; ARC-038 larch west 1J7B; ARC-039 moss east 4L9F; ARC-040 nutmeg south 6D3X; ARC-041 opal north 2S8A; ARC-042 pine west 5W1E; ARC-043 rose east 7N4G; ARC-044 stone south 9C6R; ARC-045 thyme north 3B5V; ARC-046 urn west 8F2H; ARC-047 vale east 1X7J; ARC-048 wheat south 4A9L; ARC-049 yew north 6E3D; ARC-050 zephyr west 2G8S.",
+    "repo_fixture": "../../fixtures/context-critical-facts",
+    "base_commit": "9ff5a98f5e90cfb41f2474916ff4436e37253f34c51abbbf040ed3665450060e",
+    "conversation_script": [
+      "Now implement the authoritative shipping_cents contract you retained, then run python -m unittest test_pricing.py. Do not ask me to repeat the values."
+    ],
+    "agent_config": {
+      "max_iterations": 30,
+      "context_window": 16000,
+      "compaction_trigger": 2500,
+      "compaction_target": 300
+    }
+  },
+  "outputs": {
+    "required_tests": ["python -m unittest test_pricing.py"],
+    "allowed_files": ["pricing.py"],
+    "forbidden_files": ["test_pricing.py"],
+    "critical_facts": [
+      "The compacted summary retains the 700-cent base, 120 cents per kilogram, and 350-cent remote surcharge.",
+      "The compacted summary retains that weight_kg must be a positive integer and invalid values raise ValueError.",
+      "Irrelevant ARC archive identifiers are not treated as requirements."
+    ],
+    "required_actions": [
+      "Implement shipping_cents without asking the user to repeat the original contract.",
+      "Run python -m unittest test_pricing.py."
+    ]
+  },
+  "metadata": {
+    "id": "context-critical-facts",
+    "suite": "context",
+    "category": "critical-fact-retention",
+    "difficulty": "medium",
+    "expected_compactions": 1,
+    "language": "python"
+  }
+}

@@ -123,6 +123,7 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
     started = time.monotonic()
     answers: list[str] = []
     tool_events: list[dict[str, Any]] = []
+    compaction_events: list[dict[str, Any]] = []
     test_results: list[dict[str, Any]] = []
     errors: list[str] = []
     token_usage = 0
@@ -150,7 +151,7 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
             completed = True
             for turn, prompt in enumerate((case.task, *case.conversation_script), 1):
                 answer, turn_completed, turn_usage, turn_compactions, turn_errors = (
-                    _run_turn(agent, prompt, turn, tool_events)
+                    _run_turn(agent, prompt, turn, tool_events, compaction_events)
                 )
                 answers.append(answer)
                 token_usage += turn_usage
@@ -190,7 +191,9 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
         for name in initial.keys() | final.keys()
         if initial.get(name) != final.get(name)
     )
-    validation_errors = _validate_outputs(case, changed_files, test_results)
+    validation_errors = _validate_outputs(
+        case, changed_files, test_results, compactions
+    )
     diff = _workspace_diff(initial, final)
     evidence = {
         "bench": case.record(),
@@ -208,6 +211,7 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
         "agent_errors": errors,
         "actual_compactions": compactions,
         "expected_compactions": case.metadata["expected_compactions"],
+        "compaction_events": compaction_events,
     }
     status = "completed" if completed else "agent_error"
     judge_usage = 0
@@ -242,6 +246,7 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
         "test_results": json.dumps(test_results, ensure_ascii=False),
         "validation_errors": json.dumps(validation_errors, ensure_ascii=False),
         "compactions": compactions,
+        "compaction_events": json.dumps(compaction_events, ensure_ascii=False),
     }
 
 
@@ -250,6 +255,7 @@ def _run_turn(
     prompt: str,
     turn: int,
     tool_events: list[dict[str, Any]],
+    compaction_events: list[dict[str, Any]],
 ) -> tuple[str, bool, int, int, list[str]]:
     answer = ""
     turn_text = ""
@@ -313,6 +319,18 @@ def _run_turn(
                 token_usage += event.total_tokens
             elif isinstance(event, ContextCompactionEvent):
                 compactions += event.status == "completed"
+                record = {
+                    "turn": turn,
+                    "status": event.status,
+                    "automatic": event.automatic,
+                    "before_tokens": event.before_tokens,
+                    "after_tokens": event.after_tokens,
+                }
+                if event.status == "completed":
+                    record["summary"] = getattr(
+                        getattr(agent, "context", None), "abstraction", ""
+                    )
+                compaction_events.append(record)
             elif isinstance(event, ErrorEvent):
                 errors.append(event.message)
             elif isinstance(event, LoopCompleteEvent):
@@ -330,6 +348,7 @@ def _validate_outputs(
     case: BenchCase,
     changed_files: list[str],
     test_results: list[dict[str, Any]],
+    compactions: int,
 ) -> list[str]:
     errors = [
         f"Required test failed: {result['command']}"
@@ -349,6 +368,9 @@ def _validate_outputs(
         for name in changed_files
         if any(fnmatch.fnmatchcase(name, pattern) for pattern in case.forbidden_files)
     )
+    expected = case.metadata["expected_compactions"]
+    if compactions != expected:
+        errors.append(f"Expected {expected} compactions, observed {compactions}")
     return errors
 
 
@@ -420,7 +442,10 @@ def _judge(config: Config, evidence: dict[str, Any]) -> JudgeResult:
                 "Grade this coding-agent run against the benchmark outputs. "
                 "Score 0-4: 0 no useful work, 1 major failure, 2 partial, "
                 "3 correct with only minor issues, 4 fully correct. Judge only "
-                "the supplied evidence and explain the decisive reason concisely."
+                "the supplied evidence and explain the decisive reason concisely. "
+                "For compaction cases, verify the captured summaries preserve "
+                "critical facts, newest instructions, and pending actions while "
+                "discarding irrelevant detail."
             ),
             input=json.dumps(evidence, ensure_ascii=False),
             text={
@@ -484,7 +509,8 @@ def _initialize_database(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             test_results TEXT NOT NULL DEFAULT '[]',
             validation_errors TEXT NOT NULL DEFAULT '[]',
-            compactions INTEGER NOT NULL DEFAULT 0
+            compactions INTEGER NOT NULL DEFAULT 0,
+            compaction_events TEXT NOT NULL DEFAULT '[]'
         );
         """)
     _ensure_column(connection, "cases", "case_json", "TEXT NOT NULL DEFAULT '{}'")
@@ -496,6 +522,12 @@ def _initialize_database(connection: sqlite3.Connection) -> None:
     )
     _ensure_column(
         connection, "evaluations", "compactions", "INTEGER NOT NULL DEFAULT 0"
+    )
+    _ensure_column(
+        connection,
+        "evaluations",
+        "compaction_events",
+        "TEXT NOT NULL DEFAULT '[]'",
     )
 
 

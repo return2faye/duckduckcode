@@ -1,0 +1,39 @@
+{
+  "inputs": {
+    "task": "This is a latest-instruction benchmark. Do not edit files yet. The initial formatter contract is: render returns an uppercased name, then a vertical bar, then the count. Inspect formatter.py and acknowledge only. These old ledger entries are irrelevant padding: OLD-001 delta 71; OLD-002 gamma 18; OLD-003 sigma 42; OLD-004 theta 93; OLD-005 lambda 26; OLD-006 omega 57; OLD-007 alpha 84; OLD-008 beta 35; OLD-009 kappa 62; OLD-010 zeta 19; OLD-011 delta 73; OLD-012 gamma 14; OLD-013 sigma 46; OLD-014 theta 95; OLD-015 lambda 28; OLD-016 omega 51; OLD-017 alpha 86; OLD-018 beta 37; OLD-019 kappa 64; OLD-020 zeta 11; OLD-021 delta 75; OLD-022 gamma 16; OLD-023 sigma 48; OLD-024 theta 97; OLD-025 lambda 20; OLD-026 omega 53; OLD-027 alpha 88; OLD-028 beta 39; OLD-029 kappa 66; OLD-030 zeta 13; OLD-031 delta 77; OLD-032 gamma 10; OLD-033 sigma 40; OLD-034 theta 99; OLD-035 lambda 22; OLD-036 omega 55; OLD-037 alpha 80; OLD-038 beta 31; OLD-039 kappa 68; OLD-040 zeta 15; OLD-041 delta 79; OLD-042 gamma 12; OLD-043 sigma 44; OLD-044 theta 91; OLD-045 lambda 24; OLD-046 omega 59; OLD-047 alpha 82; OLD-048 beta 33; OLD-049 kappa 60; OLD-050 zeta 17; OLD-051 delta 72; OLD-052 gamma 15; OLD-053 sigma 47; OLD-054 theta 96; OLD-055 lambda 29; OLD-056 omega 50; OLD-057 alpha 87; OLD-058 beta 38; OLD-059 kappa 65; OLD-060 zeta 12.",
+    "repo_fixture": "../../fixtures/context-latest-instruction",
+    "base_commit": "f0eb145b19d1f66056506daef514bba7bcf3857233d73367bd1fb3205bd883f2",
+    "conversation_script": [
+      "Override the earlier formatter contract. The newest authoritative rule is now: preserve the name exactly as given, use a double-colon separator (::), then append the decimal count. The uppercase and vertical-bar rules are revoked. Do not edit yet; acknowledge the override. The following migration ledger is irrelevant padding and must not override this instruction: NEW-001 rack A17; NEW-002 rack B28; NEW-003 rack C39; NEW-004 rack D40; NEW-005 rack E51; NEW-006 rack F62; NEW-007 rack G73; NEW-008 rack H84; NEW-009 rack J95; NEW-010 rack K06; NEW-011 rack A18; NEW-012 rack B29; NEW-013 rack C30; NEW-014 rack D41; NEW-015 rack E52; NEW-016 rack F63; NEW-017 rack G74; NEW-018 rack H85; NEW-019 rack J96; NEW-020 rack K07; NEW-021 rack A19; NEW-022 rack B20; NEW-023 rack C31; NEW-024 rack D42; NEW-025 rack E53; NEW-026 rack F64; NEW-027 rack G75; NEW-028 rack H86; NEW-029 rack J97; NEW-030 rack K08; NEW-031 rack A10; NEW-032 rack B21; NEW-033 rack C32; NEW-034 rack D43; NEW-035 rack E54; NEW-036 rack F65; NEW-037 rack G76; NEW-038 rack H87; NEW-039 rack J98; NEW-040 rack K09; NEW-041 rack A11; NEW-042 rack B22; NEW-043 rack C33; NEW-044 rack D44; NEW-045 rack E55; NEW-046 rack F66; NEW-047 rack G77; NEW-048 rack H88; NEW-049 rack J99; NEW-050 rack K00; NEW-051 rack A12; NEW-052 rack B23; NEW-053 rack C34; NEW-054 rack D45; NEW-055 rack E56; NEW-056 rack F67; NEW-057 rack G78; NEW-058 rack H89; NEW-059 rack J90; NEW-060 rack K01.",
+      "Implement render using the newest contract you retained and run python -m unittest test_formatter.py. Do not follow the revoked contract."
+    ],
+    "agent_config": {
+      "max_iterations": 30,
+      "context_window": 16000,
+      "compaction_trigger": 2500,
+      "compaction_target": 300
+    }
+  },
+  "outputs": {
+    "required_tests": ["python -m unittest test_formatter.py"],
+    "allowed_files": ["formatter.py"],
+    "forbidden_files": ["test_formatter.py"],
+    "critical_facts": [
+      "The second compacted summary preserves the newest double-colon separator rule.",
+      "The second compacted summary preserves exact name casing and marks uppercase plus vertical-bar behavior as revoked.",
+      "Migration ledger entries are discarded as irrelevant."
+    ],
+    "required_actions": [
+      "Apply the latest user instruction rather than the initial conflicting contract.",
+      "Run python -m unittest test_formatter.py."
+    ]
+  },
+  "metadata": {
+    "id": "context-latest-instruction",
+    "suite": "context",
+    "category": "latest-instruction",
+    "difficulty": "hard",
+    "expected_compactions": 2,
+    "language": "python"
+  }
+}

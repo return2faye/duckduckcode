@@ -84,6 +84,88 @@ class MainTest(unittest.TestCase):
 
             self.assertFalse(temporary_directory.exists())
 
+    def test_build_agent_loads_instruction_layers_and_static_tool_schemas(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            user = Path(self.home.name) / ".duckduckcode" / "DDCODE.md"
+            nested = workspace / ".duckduckcode" / "DDCODE.md"
+            user.parent.mkdir()
+            nested.parent.mkdir()
+            user.write_text("USER_LAYER_MARKER", encoding="utf-8")
+            workspace.joinpath("DDCODE.md").write_text(
+                "PROJECT_LAYER_MARKER", encoding="utf-8"
+            )
+            nested.write_text("NESTED_LAYER_MARKER", encoding="utf-8")
+            workspace.joinpath("DDCODE.local.md").write_text(
+                "LOCAL_LAYER_MARKER", encoding="utf-8"
+            )
+
+            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+                agent = build_agent(Config("test-key"), workspace)
+            self.addCleanup(agent.close)
+
+            prompt = agent.context.system_prompt
+            positions = [
+                prompt.index(text)
+                for text in (
+                    "USER_LAYER_MARKER",
+                    "PROJECT_LAYER_MARKER",
+                    "NESTED_LAYER_MARKER",
+                    "LOCAL_LAYER_MARKER",
+                )
+            ]
+            self.assertEqual(positions, sorted(positions))
+            self.assertLess(
+                prompt.index("Environment:"),
+                prompt.index("User and project instructions:"),
+            )
+            self.assertLess(
+                prompt.index("User and project instructions:"),
+                prompt.index("Mode instructions:"),
+            )
+            self.assertEqual(agent.context.tool_schemas(), agent.tools.schemas())
+
+    def test_build_agent_can_exclude_user_instructions_for_evaluations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            user = Path(self.home.name) / ".duckduckcode" / "DDCODE.md"
+            user.parent.mkdir()
+            user.write_text("machine-specific", encoding="utf-8")
+            workspace.joinpath("DDCODE.md").write_text(
+                "fixture-specific", encoding="utf-8"
+            )
+
+            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+                agent = build_agent(
+                    Config("test-key"),
+                    workspace,
+                    include_user_instructions=False,
+                )
+            self.addCleanup(agent.close)
+
+            self.assertNotIn("machine-specific", agent.context.system_prompt)
+            self.assertIn("fixture-specific", agent.context.system_prompt)
+
+    def test_build_agent_rejects_static_context_at_compaction_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            workspace.joinpath("DDCODE.md").write_text("x" * 6_000, encoding="utf-8")
+
+            with (
+                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    r"estimated at \d+ tokens.*trigger of 5000 tokens",
+                ),
+            ):
+                build_agent(
+                    Config("test-key"),
+                    workspace,
+                    context_window_tokens=20_000,
+                    compaction_trigger_tokens=5_000,
+                    compaction_target_tokens=1_000,
+                )
+
     def test_full_access_disables_the_os_sandbox(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -48,6 +48,32 @@ DuckDuckCode starts the TUI by default. The upper area shows the duck banner, ve
 
 `Agent` owns `ToolManager`, passes tool schemas into `ContextManager`, executes returned tool calls, appends the tool call/result messages, then asks the model again for the final answer.
 
+## User and project instructions
+
+DuckDuckCode loads instruction files once when an agent starts, in increasing
+priority order:
+
+1. `~/.duckduckcode/DDCODE.md`
+2. `<workspace>/DDCODE.md`
+3. `<workspace>/.duckduckcode/DDCODE.md`
+4. `<workspace>/DDCODE.local.md`
+
+Missing and empty files are skipped. Later files override conflicting earlier
+instructions, but cannot override DuckDuckCode's built-in safety or mode rules.
+An instruction line containing only `@relative/path` expands that UTF-8 file in
+place, relative to the file containing the reference. References stay inside the
+workspace (or `~/.duckduckcode` for user instructions), including after resolving
+symbolic links. Absolute paths, globs, URLs, and anchors are unsupported. Cycles
+fail startup, duplicate references expand once per top-level file, and nesting is
+limited to five referenced levels.
+
+Expanded instructions remain in the system prompt, count toward the static token
+estimate with tool schemas, and are never summarized or compacted. Restart the
+agent to pick up changes. Startup fails if this non-compactable static context
+reaches the compaction threshold. `duckduckcode-eval` loads instruction files from
+its fixture workspace but excludes the machine's user-level file for reproducible
+runs.
+
 The default model is `o4-mini`, a reasoning model. Reasoning effort defaults to `low`; CLI selection can be added later.
 
 `OpenAIClient.stream()` uses Responses API SSE streaming and yields internal stream events. The parser currently handles text deltas, function tool calls, errors, and completion.

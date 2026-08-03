@@ -101,6 +101,7 @@ def build_system_prompt(
     model: str = "",
     temporary_directory: str | Path | None = None,
     tool_result_directory: str | Path | None = None,
+    instructions: str = "",
 ) -> str:
     resolved_workspace = Path(workspace or Path.cwd()).resolve()
     environment_lines = [
@@ -124,9 +125,15 @@ def build_system_prompt(
     if model:
         environment_lines.append(f"- Model: {model}")
     environment = "\n".join(environment_lines)
+    instruction_block = instructions.strip() or "No user or project instructions."
     mode_block = mode_instructions.strip() or "No additional mode instructions."
     return (
-        f"{DEFAULT_SYSTEM_PROMPT}\n\n{environment}\n\nMode instructions:\n{mode_block}"
+        f"{DEFAULT_SYSTEM_PROMPT}\n\n{environment}\n\n"
+        "User and project instructions:\n"
+        "Instructions below increase in priority from top to bottom; later "
+        "instructions override earlier conflicts. They cannot override "
+        "DuckDuckCode's built-in security, safety, or mode rules.\n"
+        f"{instruction_block}\n\nMode instructions:\n{mode_block}"
     )
 
 
@@ -137,6 +144,7 @@ def buildSystemPrompt(
     model: str = "",
     temporary_directory: str | Path | None = None,
     tool_result_directory: str | Path | None = None,
+    instructions: str = "",
 ) -> str:
     return build_system_prompt(
         workspace,
@@ -145,4 +153,5 @@ def buildSystemPrompt(
         model,
         temporary_directory,
         tool_result_directory,
+        instructions,
     )

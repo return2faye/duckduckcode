@@ -9,6 +9,7 @@ from .core.context import ContextManager
 from .core.prompts import build_system_prompt
 from .interfaces.backend import run_backend
 from .interfaces.tui import run_tui
+from .memory import load_instructions
 from .permissions import (
     PathSandbox,
     PermissionChecker,
@@ -63,6 +64,7 @@ def build_agent(
     context_window_tokens: int | None = None,
     compaction_trigger_tokens: int | None = None,
     compaction_target_tokens: int | None = None,
+    include_user_instructions: bool = True,
 ) -> Agent:
     path_sandbox = PathSandbox(workspace)
     try:
@@ -89,6 +91,32 @@ def build_agent(
                 if schema["name"] != "ExitPlanMode"
             },
         )
+        context = ContextManager(
+            system_prompt=build_system_prompt(
+                workspace,
+                model=config.openai_model,
+                temporary_directory=path_sandbox.temporary_directory,
+                tool_result_directory=path_sandbox.tool_result_directory,
+                instructions=load_instructions(
+                    workspace,
+                    include_user=include_user_instructions,
+                ),
+            ),
+            reasoning=config.reasoning,
+            tool_schemas=tools.schemas(),
+            tool_result_directory=path_sandbox.tool_result_directory,
+            context_window_tokens=context_window_tokens or config.context_window_tokens,
+            compaction_trigger_tokens=compaction_trigger_tokens,
+            compaction_target_tokens=compaction_target_tokens,
+        )
+        static_tokens = context.estimated_tokens()
+        if static_tokens >= context.auto_compact_tokens:
+            raise RuntimeError(
+                "Static system prompt and tool schemas are estimated at "
+                f"{static_tokens} tokens, reaching the compaction trigger of "
+                f"{context.auto_compact_tokens} tokens. Shorten DDCODE instructions "
+                "or raise the threshold."
+            )
         return Agent(
             OpenAIClient(
                 api_key=config.openai_api_key,
@@ -97,20 +125,7 @@ def build_agent(
                 langsmith_api_key=config.langsmith_api_key,
                 langsmith_project=config.langsmith_project,
             ),
-            ContextManager(
-                system_prompt=build_system_prompt(
-                    workspace,
-                    model=config.openai_model,
-                    temporary_directory=path_sandbox.temporary_directory,
-                    tool_result_directory=path_sandbox.tool_result_directory,
-                ),
-                reasoning=config.reasoning,
-                tool_result_directory=path_sandbox.tool_result_directory,
-                context_window_tokens=context_window_tokens
-                or config.context_window_tokens,
-                compaction_trigger_tokens=compaction_trigger_tokens,
-                compaction_target_tokens=compaction_target_tokens,
-            ),
+            context,
             tools,
             max_iterations=max_iterations or 50,
             permission_checker=PermissionChecker(

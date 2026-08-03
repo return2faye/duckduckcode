@@ -419,6 +419,26 @@ class ContextManagerTest(unittest.TestCase):
         )
         self.assertEqual(context.messages(), [Message("user", "hello")])
 
+    def test_project_instructions_stay_in_system_prompt_outside_compaction(
+        self,
+    ) -> None:
+        context = ContextManager(system_prompt="system: immutable project rule")
+        context.add_user("old request " + "x" * 100_000)
+        context.add_assistant("old answer")
+        context.add_user("current request")
+
+        candidate = context.compaction_input()
+
+        self.assertIsNotNone(candidate)
+        transcript, cutoff = candidate or ("", 0)
+        self.assertNotIn("immutable project rule", transcript)
+        context.apply_compaction("summary", cutoff)
+        self.assertEqual(context.system_prompt, "system: immutable project rule")
+        self.assertEqual(
+            context.model_messages()[0],
+            Message("system", "system: immutable project rule"),
+        )
+
     def test_context_compacts_complete_old_turns_and_keeps_recent_messages(
         self,
     ) -> None:

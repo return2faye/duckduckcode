@@ -10,7 +10,7 @@
     "agent_config": {
       "max_iterations": 30,
       "context_window": 16000,
-      "compaction_trigger": 2500,
+      "compaction_trigger": 5000,
       "compaction_target": 300
     }
   },

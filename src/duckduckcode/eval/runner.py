@@ -146,6 +146,7 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
                 context_window_tokens=agent_config.context_window,
                 compaction_trigger_tokens=agent_config.compaction_trigger,
                 compaction_target_tokens=agent_config.compaction_target,
+                include_user_instructions=False,
             )
             agent.set_permission_mode("accept_edits")
             completed = True

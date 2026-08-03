@@ -10,7 +10,7 @@ from .core.event import ConversationEvent, ErrorEvent
 from .core.prompts import build_system_prompt
 from .interfaces.backend import run_backend
 from .interfaces.tui import run_tui
-from .memory import SessionManager, load_instructions
+from .memory import MemoryManager, SessionManager, load_instructions
 from .permissions import (
     PathSandbox,
     PermissionChecker,
@@ -50,6 +50,8 @@ def main() -> None:
                 if isinstance(event, ConversationEvent):
                     print(event.delta, end="", flush=True)
                 elif isinstance(event, ErrorEvent):
+                    if event.code == "memory":
+                        continue
                     raise RuntimeError(event.message)
             print()
             return
@@ -77,6 +79,7 @@ def build_agent(
     compaction_target_tokens: int | None = None,
     include_user_instructions: bool = True,
     enable_sessions: bool = True,
+    enable_memory: bool = True,
 ) -> Agent:
     path_sandbox = PathSandbox(workspace)
     try:
@@ -103,6 +106,10 @@ def build_agent(
                 if schema["name"] != "ExitPlanMode"
             },
         )
+        memory_manager = MemoryManager(workspace) if enable_memory else None
+        memory_snapshot = (
+            memory_manager.refresh(check_state=False)[0] if memory_manager else ""
+        )
         context = ContextManager(
             system_prompt=build_system_prompt(
                 workspace,
@@ -115,6 +122,7 @@ def build_agent(
                 ),
             ),
             reasoning=config.reasoning,
+            long_term_memory=memory_snapshot,
             tool_schemas=tools.schemas(),
             tool_result_directory=path_sandbox.tool_result_directory,
             context_window_tokens=context_window_tokens or config.context_window_tokens,
@@ -127,7 +135,7 @@ def build_agent(
                 "Static system prompt and tool schemas are estimated at "
                 f"{static_tokens} tokens, reaching the compaction trigger of "
                 f"{context.auto_compact_tokens} tokens. Shorten DDCODE instructions "
-                "or raise the threshold."
+                "or MEMORY content, or raise the threshold."
             )
         session_manager = (
             SessionManager(workspace, context) if enable_sessions else None
@@ -149,6 +157,7 @@ def build_agent(
             ),
             plan_file=workspace / ".duckduckcode" / "plan.md",
             session_manager=session_manager,
+            memory_manager=memory_manager,
         )
     except Exception:
         path_sandbox.close()

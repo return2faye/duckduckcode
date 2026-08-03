@@ -48,6 +48,7 @@ class Agent:
         permission_checker: PermissionChecker | None = None,
         plan_file: str | Path | None = None,
         session_manager: object | None = None,
+        memory_manager: object | None = None,
     ) -> None:
         if (
             isinstance(max_iterations, bool)
@@ -62,6 +63,7 @@ class Agent:
         self.permission_checker = permission_checker or PermissionChecker()
         self.plan_file = Path(plan_file).resolve() if plan_file is not None else None
         self.session_manager = session_manager
+        self.memory_manager = memory_manager
         self._session_snapshot = (
             session_manager.start() if session_manager is not None else None
         )
@@ -161,6 +163,16 @@ class Agent:
             self.permission_checker.finish_task()
 
     def _stream(self, user_message: str) -> Generator[AgentEvent, AgentResponse, None]:
+        memory_start = (
+            len(self.session_manager.snapshot().records)
+            if self.memory_manager is not None and self.session_manager is not None
+            else None
+        )
+        if self.memory_manager is not None:
+            memory, warning = self.memory_manager.refresh()
+            self.context.set_long_term_memory(memory)
+            if warning:
+                yield ErrorEvent(warning, "memory")
         try:
             self._add_user(user_message)
         except Exception as exc:
@@ -373,6 +385,7 @@ class Agent:
                     continue
                 if approved_plan_active and not plan_execution_failed:
                     self._remove_plan_file()
+                self._start_memory_worker(memory_start)
                 yield LoopCompleteEvent("completed", iteration)
                 return
             if iteration == self.max_iterations:
@@ -662,6 +675,22 @@ class Agent:
             self.context.apply_compaction(summary, cutoff)
         else:
             self.session_manager.commit_compaction(summary, cutoff, token_usage)
+
+    def _start_memory_worker(self, start: int | None) -> None:
+        if self.memory_manager is None or self.session_manager is None or start is None:
+            return
+        path = self.session_manager.current_path
+        session_id = self.session_manager.current_session_id
+        if path is None or session_id is None:
+            return
+        end = len(self.session_manager.snapshot().records)
+        try:
+            self.memory_manager.spawn_worker(path, session_id, start, end)
+        except Exception as exc:
+            try:
+                self.memory_manager.write_state(str(exc))
+            except Exception:
+                pass
 
     def close(self) -> None:
         try:

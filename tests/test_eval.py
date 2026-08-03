@@ -279,6 +279,7 @@ class EvalRunTest(unittest.TestCase):
         self.assertEqual(build_kwargs[0]["compaction_target_tokens"], 10_000)
         self.assertFalse(build_kwargs[0]["include_user_instructions"])
         self.assertFalse(build_kwargs[0]["enable_sessions"])
+        self.assertFalse(build_kwargs[0]["enable_memory"])
         self.assertEqual(len(rows), 2)
         self.assertEqual(
             rows[0][:4],

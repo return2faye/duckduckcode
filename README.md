@@ -45,14 +45,17 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `core/event.py`: internal streaming and session lifecycle events
 - `eval/`: benchmark loading, isolated execution, local result storage, and judging
 - `memory/instruction.py`: project and user instruction loading
+- `memory/long_term.py`: validated user/project long-term memory storage and injection
 - `memory/session.py`: secure workspace-local JSONL session persistence
+- `memory/worker.py`: asynchronous per-loop memory extraction
+- `memory/consolidate.py`: locked staging-based periodic memory consolidation
 - `providers/openai/`: OpenAI Responses API client, serializers, and SSE handling
 - `interfaces/tui.py`: curses frontend that talks to the backend through pipes
 - `tools/tool.py`: `ToolManager`, tool schemas, and tool-call execution
 
 `ContextManager` builds the model context: system prompt first, optional abstraction
-summary and stale-session reminder next, then user, assistant, tool-call, and
-tool-result messages.
+summary, long-term-memory snapshot, and stale-session reminder next, then user,
+assistant, tool-call, and tool-result messages.
 
 `Agent` owns `ToolManager`, passes tool schemas into `ContextManager`, executes returned tool calls, appends the tool call/result messages, then asks the model again for the final answer.
 
@@ -127,6 +130,75 @@ Session storage is intentionally workspace-local and single-process. There are
 no cross-process locks, titles, search, export, or configurable retention yet.
 Evaluation runs explicitly disable sessions and never read or write this
 directory.
+
+## Automatic long-term memory
+
+DuckDuckCode keeps durable memory in two local scopes:
+
+- user: `~/.duckduckcode/memory/`
+- project: `<workspace>/.duckduckcode/memory/` (ignored by Git)
+
+Each scope has a generated `MEMORY.md` index and one Markdown file per memory at
+`<category>/<id>.md`. Categories are `preference` for stable user preferences,
+`feedback` for narrowly applicable lessons from explicit user corrections,
+`project` for workspace facts, and `reference` for reusable reference material.
+Preferences and feedback are user-scoped, project facts are project-scoped, and
+references use whichever scope they apply to.
+
+Every memory file has strict YAML frontmatter with exactly `id`, `category`,
+`scope`, `summary`, `tags`, `created_at`, `updated_at`, and `source_session`.
+Its body records the fact, applicability boundary, and necessary details. The
+index links every file exactly once and repeats the same self-contained summary.
+Invalid UTF-8, duplicate fields or IDs, path traversal, symbolic links,
+non-regular files, inconsistent metadata, and likely credentials/private keys
+are rejected before publication.
+
+At startup and before persisting each new user message, DuckDuckCode refreshes a
+snapshot containing the user index first and project index second. Individual
+memory files are not injected. The complete tagged snapshot, separator, and any
+truncation warning are limited to 200 lines and 25KB of valid UTF-8. When needed,
+project index lines receive space before user index lines. Memory is a separate,
+non-compactable system message after the optional conversation abstraction and
+is explicitly marked as possibly stale background that cannot override safety,
+DDCODE instructions, or the current request. Startup fails when the system
+prompt, DDCODE instructions, memory, and tool schemas already reach the
+compaction threshold.
+
+After a loop has successfully persisted its final assistant reply and has no
+pending tools, the agent starts one detached `python -m duckduckcode.memory.worker`
+process and immediately returns. The worker rereads only that loop's JSONL
+records, keeps visible messages plus bounded tool arguments/result previews, and
+limits extraction input to 128KiB. It makes one Responses API call with the
+configured model/reasoning and accepts changes only through one strict tool call.
+The model decides whether memories are durable, duplicate, contradictory, or
+obsolete; the host validates `create`, `update`, and `delete` actions, generates
+IDs/timestamps, and atomically regenerates affected indexes. Credentials, tokens,
+private keys, and transient task status must never be stored.
+
+Writers take POSIX `flock` locks at each scope's `.write-lock` in sorted absolute
+path order. After extraction, consolidation becomes eligible only when the
+project `.consolidate-lock` is strictly older than seven days and at least five
+distinct valid sessions have real activity since the previous success.
+Compaction checkpoints, synthetic repairs, and invalid sessions do not count.
+Only one consolidator can hold the non-blocking lock; its PID is diagnostic, the
+run times out after one hour, and a failed run restores the prior successful
+mtime.
+
+Consolidation copies both scopes to staging while holding both write locks. Its
+restricted agent can read staging and workspace sessions, can write only staging
+memory, and has a no-shell facade limited to read-only `ls`, `cat`, `grep`, and
+`rg`. It locates memories, selectively gathers recent session evidence, resolves
+duplicates/conflicts and relative dates, then prunes indexes. The host validates
+all staged files, frontmatter, IDs, links, summaries, scopes, and the untruncated
+combined index limit before publishing each scope in file/index/delete order.
+Failure or timeout leaves real memory unchanged.
+
+A running worker never blocks the next turn; the old valid snapshot remains in
+use until refresh. A corrupt replacement also leaves the old snapshot active.
+Background failures are written atomically to project memory state and surfaced
+once on the next turn through the existing `ErrorEvent(code="memory")`; a later
+successful task clears the state. Evaluation runs pass `enable_memory=False`, so
+they do not read user memory, create memory directories, or launch workers.
 
 ## Local evaluations
 

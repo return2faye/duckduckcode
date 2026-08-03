@@ -75,6 +75,7 @@ class ContextManager:
         workspace: str | Path | None = None,
         mode_instructions: str = "",
         abstraction: str = "",
+        long_term_memory: str = "",
         reasoning: ReasoningConfig | None = None,
         tool_schemas: list[dict[str, Any]] | None = None,
         tool_result_directory: str | Path | None = None,
@@ -100,6 +101,7 @@ class ContextManager:
             tool_result_directory=tool_result_directory,
         )
         self.abstraction = abstraction
+        self.long_term_memory = long_term_memory
         self.reasoning = reasoning or ReasoningConfig()
         self._tool_schemas = tool_schemas or []
         self._tool_result_base = (
@@ -231,6 +233,8 @@ class ContextManager:
                     f"{self.abstraction}",
                 )
             )
+        if self.long_term_memory:
+            messages.append(Message("system", self.long_term_memory))
         if self.reminder:
             messages.append(Message("system", self.reminder))
         if self.mode == "plan":
@@ -308,6 +312,9 @@ class ContextManager:
 
     def set_reminder(self, reminder: str) -> None:
         self.reminder = reminder
+
+    def set_long_term_memory(self, memory: str) -> None:
+        self.long_term_memory = memory
 
     def restore(
         self,

@@ -11,6 +11,7 @@ from duckduckcode.config import Config
 from duckduckcode.core.event import (
     ConversationEvent,
     DoneEvent,
+    ErrorEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
@@ -28,6 +29,15 @@ class MainTest(unittest.TestCase):
         )
         home_patch.start()
         self.addCleanup(home_patch.stop)
+        memory_home_patch = patch(
+            "duckduckcode.memory.long_term.Path.home",
+            return_value=Path(self.home.name),
+        )
+        memory_home_patch.start()
+        self.addCleanup(memory_home_patch.stop)
+        worker_patch = patch("duckduckcode.memory.long_term.MemoryManager.spawn_worker")
+        self.worker = worker_patch.start()
+        self.addCleanup(worker_patch.stop)
 
     def test_build_agent_registers_core_file_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -148,6 +158,25 @@ class MainTest(unittest.TestCase):
 
             self.assertNotIn("machine-specific", agent.context.system_prompt)
             self.assertIn("fixture-specific", agent.context.system_prompt)
+
+    def test_build_agent_can_disable_all_memory_io_for_evaluations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with (
+                patch("duckduckcode.main.MemoryManager") as memory,
+                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+            ):
+                agent = build_agent(
+                    Config("test-key"),
+                    workspace,
+                    enable_sessions=False,
+                    enable_memory=False,
+                )
+            self.addCleanup(agent.close)
+
+            memory.assert_not_called()
+            self.assertIsNone(agent.memory_manager)
+            self.assertFalse((workspace / ".duckduckcode" / "memory").exists())
 
     def test_build_agent_rejects_static_context_at_compaction_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -425,6 +454,25 @@ class MainTest(unittest.TestCase):
         agent.stream.assert_called_once_with("hello")
         agent.close.assert_called_once_with()
         run.assert_not_called()
+
+    def test_prompt_argument_does_not_fail_on_memory_warning(self) -> None:
+        config = Config("test-key")
+        agent = Mock()
+        agent.stream.return_value = [
+            ErrorEvent("old memory snapshot retained", "memory"),
+            ConversationEvent("hello back"),
+        ]
+        output = io.StringIO()
+        with (
+            patch("sys.argv", ["duckduckcode", "hello"]),
+            patch("sys.stdout", output),
+            patch("duckduckcode.main.Config.from_env", return_value=config),
+            patch("duckduckcode.main.Path.cwd", return_value=Path("/project")),
+            patch("duckduckcode.main.build_agent", return_value=agent),
+        ):
+            main()
+
+        self.assertEqual(output.getvalue(), "hello back\n")
 
 
 if __name__ == "__main__":

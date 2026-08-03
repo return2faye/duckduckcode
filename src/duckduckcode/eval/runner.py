@@ -148,6 +148,7 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
                 compaction_target_tokens=agent_config.compaction_target,
                 include_user_instructions=False,
                 enable_sessions=False,
+                enable_memory=False,
             )
             agent.set_permission_mode("accept_edits")
             completed = True

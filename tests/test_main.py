@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -47,6 +48,8 @@ class MainTest(unittest.TestCase):
                     "ExitPlanMode",
                 ],
             )
+            self.assertIsNotNone(agent.session_manager)
+            self.assertTrue(agent.session_manager.current_path.is_file())
             agent.enter_plan_mode()
             self.assertEqual(agent.context.mode, "plan")
             self.assertEqual(
@@ -402,6 +405,26 @@ class MainTest(unittest.TestCase):
 
         run.assert_called_once_with(agent)
         agent.close.assert_called_once_with()
+
+    def test_prompt_argument_runs_one_headless_turn(self) -> None:
+        config = Config("test-key")
+        agent = Mock()
+        agent.stream.return_value = [ConversationEvent("hello back")]
+        output = io.StringIO()
+        with (
+            patch("sys.argv", ["duckduckcode", "hello"]),
+            patch("sys.stdout", output),
+            patch("duckduckcode.main.Config.from_env", return_value=config),
+            patch("duckduckcode.main.Path.cwd", return_value=Path("/project")),
+            patch("duckduckcode.main.build_agent", return_value=agent),
+            patch("duckduckcode.main.run_tui") as run,
+        ):
+            main()
+
+        self.assertEqual(output.getvalue(), "hello back\n")
+        agent.stream.assert_called_once_with("hello")
+        agent.close.assert_called_once_with()
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

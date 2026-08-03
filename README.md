@@ -29,22 +29,30 @@ uv run duckduckcode
 
 DuckDuckCode starts the TUI by default. The upper area shows the duck banner, version, working directory, and chat history. The lower input area accepts prompts, and the bottom status bar shows the model and token usage. Press `Esc` to interrupt a response, or press it while idle to exit.
 
+Chats resume the most recently active valid workspace session automatically. Use
+`/sessions` to open an arrow-key session picker (Enter resumes, Esc closes),
+`/new` to start an empty one, and `/delete-session [id]` twice to confirm
+permanent deletion.
+Session switching is available only while the agent is idle and outside Plan Mode.
+
 ## Structure
 
-- `agent.py`: main multi-turn agent flow
-- `backend.py`: JSONL pipe backend used by the TUI frontend
-- `client.py`: provider-neutral `Client` abstraction
+- `core/agent.py`: main multi-turn agent flow
+- `interfaces/backend.py`: JSONL pipe backend used by the TUI frontend
+- `core/client.py`: provider-neutral `Client` abstraction
 - `config.py`: startup configuration loaded from environment variables
-- `context.py`: `Message` object, system prompt, abstraction, tool schemas, and in-memory `ContextManager`
-- `event.py`: internal streaming events such as `ConversationEvent`, `ToolCallEvent`, and `ErrorEvent`
+- `core/context.py`: `Message`, system prompt, abstraction, tool schemas, and `ContextManager`
+- `core/event.py`: internal streaming and session lifecycle events
 - `eval/`: benchmark loading, isolated execution, local result storage, and judging
-- `openai_client.py`: OpenAI Responses API implementation
-- `serialize.py`: provider-specific message serializers and response deserializers
-- `stream.py`: OpenAI SSE event parser and event handler
-- `tui.py`: curses frontend that talks to the backend through stdin/stdout pipes
-- `tool.py`: `ToolManager`, tool schemas, and tool-call execution
+- `memory/instruction.py`: project and user instruction loading
+- `memory/session.py`: secure workspace-local JSONL session persistence
+- `providers/openai/`: OpenAI Responses API client, serializers, and SSE handling
+- `interfaces/tui.py`: curses frontend that talks to the backend through pipes
+- `tools/tool.py`: `ToolManager`, tool schemas, and tool-call execution
 
-`ContextManager` builds the model context: system prompt first, optional abstraction summary second, then user, assistant, tool-call, and tool-result messages. There is no persistent memory layer yet.
+`ContextManager` builds the model context: system prompt first, optional abstraction
+summary and stale-session reminder next, then user, assistant, tool-call, and
+tool-result messages.
 
 `Agent` owns `ToolManager`, passes tool schemas into `ContextManager`, executes returned tool calls, appends the tool call/result messages, then asks the model again for the final answer.
 
@@ -79,6 +87,46 @@ The default model is `o4-mini`, a reasoning model. Reasoning effort defaults to 
 `OpenAIClient.stream()` uses Responses API SSE streaming and yields internal stream events. The parser currently handles text deltas, function tool calls, errors, and completion.
 
 During streaming, `Agent.stream()` creates an empty assistant message, appends text deltas into it, then marks it `completed` or `error`. `Message.token_usage` records returned usage for now; token accounting can be added later.
+
+## Sessions
+
+Each workspace stores chats in `.duckduckcode/sessions/`. Session files are
+UTF-8 JSONL named with local time (`YYYYMMDD-HHMMSS.jsonl`, then `-2`, `-3`,
+and so on for same-second collisions). The directory is mode `0700`; files are
+mode `0600` and ignored by Git. Every line has exactly `role`, `context`, and
+Unix-second `ts` fields. Context records are one of:
+
+- `message`: content, completed/error status, token usage, and TUI visibility
+- `tool_call`: call ID, tool name, and arguments
+- `tool_result`: call ID, tool name, content, and error status
+- `compaction`: summary, model-message cutoff, and token usage
+
+DuckDuckCode writes, flushes, and `fsync`s a record before adding it to model
+context. A persistence failure stops the turn or tool chain without advancing
+context. Completed and interrupted assistant replies are saved; an unfinished
+delta can be lost only if the process hard-crashes mid-stream. On recovery, a
+tool call that has no result receives an explicit synthetic error result so the
+model never sees a broken tool chain.
+
+Compaction appends a checkpoint before replacing old model messages with its
+summary. The source JSONL remains append-only, so the TUI can restore the full
+visible history while the model receives the latest summary plus uncompressed
+messages. Stored token usage is restored into the TUI total. If restored context
+already reaches the compaction threshold, startup attempts automatic compaction
+once before accepting input; failures keep the session intact and suggest
+`/new`.
+
+When the last real activity is strictly more than 24 hours old, the model gets a
+derived reminder to re-read relevant files because workspace code may have
+changed. The reminder is not written to disk and does not update activity time.
+Before automatic restore, valid sessions strictly older than 30 days are deleted;
+empty sessions use file creation time. Invalid JSONL and symbolic links are kept,
+reported as invalid, never restored, and never cleaned automatically.
+
+Session storage is intentionally workspace-local and single-process. There are
+no cross-process locks, titles, search, export, or configurable retention yet.
+Evaluation runs explicitly disable sessions and never read or write this
+directory.
 
 ## Local evaluations
 

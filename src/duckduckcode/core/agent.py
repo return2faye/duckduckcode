@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from .client import Client
 from .context import (
@@ -22,6 +22,8 @@ from .event import (
     PermissionRequestEvent,
     PlanReviewEvent,
     PlanReviewResponse,
+    SessionListEvent,
+    SessionStateEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -45,6 +47,7 @@ class Agent:
         max_iterations: int = 50,
         permission_checker: PermissionChecker | None = None,
         plan_file: str | Path | None = None,
+        session_manager: object | None = None,
     ) -> None:
         if (
             isinstance(max_iterations, bool)
@@ -58,6 +61,11 @@ class Agent:
         self.max_iterations = max_iterations
         self.permission_checker = permission_checker or PermissionChecker()
         self.plan_file = Path(plan_file).resolve() if plan_file is not None else None
+        self.session_manager = session_manager
+        self._session_snapshot = (
+            session_manager.start() if session_manager is not None else None
+        )
+        self._startup_checked = False
         self._compaction_circuit_open = False
 
     def enter_plan_mode(self, plan_file: str | Path | None = None) -> None:
@@ -70,14 +78,65 @@ class Agent:
 
     def cancel_plan_mode(self) -> None:
         self._remove_plan_file()
-        self.context.set_mode("default")
-        self.context.add_user(
+        self._add_user(
             "Plan Mode was cancelled. Do not execute the pending plan "
-            "unless the user asks again."
+            "unless the user asks again.",
+            visible=False,
         )
+        self.context.set_mode("default")
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self.permission_checker.set_permission_mode(mode)
+
+    def initialize(self) -> Generator[AgentEvent, None, None]:
+        if self._session_snapshot is not None:
+            yield _session_state("initialized", self._session_snapshot)
+        yield from self._startup_compaction()
+        yield LoopCompleteEvent("completed", 0)
+
+    def list_sessions(self) -> Generator[AgentEvent, None, None]:
+        manager = self._require_sessions()
+        yield SessionListEvent(
+            tuple(
+                {
+                    "id": info.id,
+                    "created_at": info.created_at,
+                    "last_activity": info.last_activity,
+                    "status": info.status,
+                    "active": info.active,
+                }
+                for info in manager.list()
+            )
+        )
+        yield LoopCompleteEvent("completed", 0)
+
+    def new_session(self) -> Generator[AgentEvent, None, None]:
+        self._ensure_session_switch_allowed()
+        snapshot = self._require_sessions().create()
+        self._session_snapshot = snapshot
+        self._startup_checked = False
+        yield _session_state("new", snapshot)
+        yield from self._startup_compaction()
+        yield LoopCompleteEvent("completed", 0)
+
+    def resume_session(self, session_id: str) -> Generator[AgentEvent, None, None]:
+        self._ensure_session_switch_allowed()
+        snapshot = self._require_sessions().resume(session_id)
+        self._session_snapshot = snapshot
+        self._startup_checked = False
+        yield _session_state("resumed", snapshot)
+        yield from self._startup_compaction()
+        yield LoopCompleteEvent("completed", 0)
+
+    def delete_session(
+        self, session_id: str | None = None
+    ) -> Generator[AgentEvent, None, None]:
+        self._ensure_session_switch_allowed()
+        snapshot = self._require_sessions().delete(session_id)
+        self._session_snapshot = snapshot
+        self._startup_checked = False
+        yield _session_state("deleted", snapshot)
+        yield LoopCompleteEvent("completed", 0)
 
     def compact(self) -> Generator[AgentEvent, None, None]:
         self._compaction_circuit_open = False
@@ -102,7 +161,12 @@ class Agent:
             self.permission_checker.finish_task()
 
     def _stream(self, user_message: str) -> Generator[AgentEvent, AgentResponse, None]:
-        self.context.add_user(user_message)
+        try:
+            self._add_user(user_message)
+        except Exception as exc:
+            yield _persistence_error(exc)
+            yield LoopCompleteEvent("error", 0)
+            return
         self.context.set_tool_schemas(self.tools.schemas())
         plan_execution_pending = False
         approved_plan_active = False
@@ -146,9 +210,16 @@ class Agent:
                                     tool_calls.append(event.tool_call)
                                     yield event
                                 elif isinstance(event, DoneEvent):
-                                    self.context.finish_assistant_stream(
-                                        assistant_index, event.token_usage
-                                    )
+                                    try:
+                                        self._finish_assistant(
+                                            assistant_index,
+                                            "completed",
+                                            event.token_usage,
+                                        )
+                                    except Exception as exc:
+                                        api_error = _persistence_error(exc)
+                                        stream_finished = True
+                                        break
                                     stream_finished = True
                                     token_usage = event.token_usage
                                     break
@@ -163,6 +234,10 @@ class Agent:
                         api_error = _error_from_exception(exc)
 
                     if api_error is not None:
+                        if api_error.code == "session_persistence":
+                            yield api_error
+                            yield LoopCompleteEvent("error", iteration)
+                            return
                         assistant = self.context.messages()[assistant_index]
                         can_recover = (
                             _is_context_length_error(api_error)
@@ -182,9 +257,24 @@ class Agent:
                                 yield LoopCompleteEvent("error", iteration)
                                 return
                         else:
-                            self.context.fail_assistant_stream(assistant_index)
+                            try:
+                                self._finish_assistant(assistant_index, "error")
+                            except Exception as exc:
+                                stream_finished = True
+                                yield _persistence_error(exc)
+                                yield LoopCompleteEvent("error", iteration)
+                                return
                             stream_finished = True
                         yield api_error
+                        yield LoopCompleteEvent("error", iteration)
+                        return
+
+                    try:
+                        if self.session_manager is not None:
+                            for tool_call in tool_calls:
+                                self._add_tool_call(tool_call)
+                    except Exception as exc:
+                        yield _persistence_error(exc)
                         yield LoopCompleteEvent("error", iteration)
                         return
 
@@ -203,20 +293,22 @@ class Agent:
                         completed_results = self.context.compact_tool_results(
                             completed_results
                         )
-                        for tool_call, result in completed_results:
-                            yield ToolResultEvent(
-                                tool_call.call_id,
-                                tool_call.name,
-                                result.content,
-                                result.is_error,
-                            )
-                    for tool_call in tool_calls:
-                        self.context.add_tool_call(tool_call)
-                    for tool_call, result in completed_results:
-                        self.context.add_tool_result(
-                            tool_call.call_id,
-                            result.to_model_output(),
-                        )
+                        try:
+                            if self.session_manager is None:
+                                for tool_call in tool_calls:
+                                    self._add_tool_call(tool_call)
+                            for tool_call, result in completed_results:
+                                self._add_tool_result(tool_call, result)
+                                yield ToolResultEvent(
+                                    tool_call.call_id,
+                                    tool_call.name,
+                                    result.content,
+                                    result.is_error,
+                                )
+                        except Exception as exc:
+                            yield _persistence_error(exc)
+                            yield LoopCompleteEvent("error", iteration)
+                            return
                     plan_approved = self.context.mode == "default" and any(
                         tool_call.name == "ExitPlanMode" and not result.is_error
                         for tool_call, result in completed_results
@@ -236,14 +328,32 @@ class Agent:
                     yield UsageEvent(token_usage)
                     yield TurnCompleteEvent(iteration)
                 except KeyboardInterrupt:
-                    self.context.fail_assistant_stream(assistant_index)
+                    try:
+                        if not stream_finished:
+                            self._finish_assistant(assistant_index, "error")
+                        elif self.session_manager is None:
+                            self.context.fail_assistant_stream(assistant_index)
+                        elif self.session_manager is not None:
+                            for tool_call in tool_calls:
+                                self._add_tool_result(
+                                    tool_call,
+                                    ToolResult("Tool execution was interrupted.", True),
+                                )
+                    except Exception as exc:
+                        stream_finished = True
+                        yield _persistence_error(exc)
+                        yield LoopCompleteEvent("error", iteration)
+                        return
                     stream_finished = True
                     yield ErrorEvent("interrupted", "interrupted")
                     yield LoopCompleteEvent("cancelled", iteration)
                     return
             finally:
                 if not stream_finished:
-                    self.context.fail_assistant_stream(assistant_index)
+                    try:
+                        self._finish_assistant(assistant_index, "error")
+                    except Exception:
+                        pass
 
             if not tool_calls:
                 if plan_execution_pending:
@@ -254,10 +364,11 @@ class Agent:
                         )
                         yield LoopCompleteEvent("max_iterations", iteration)
                         return
-                    self.context.add_user(
+                    self._add_user(
                         "The plan is approved, but execution has not started. "
                         "Begin executing it now with the required tools. "
-                        "Do not only describe what you will do."
+                        "Do not only describe what you will do.",
+                        visible=False,
                     )
                     continue
                 if approved_plan_active and not plan_execution_failed:
@@ -373,7 +484,16 @@ class Agent:
                             )
                         )
                     raise RuntimeError("the model attempted to call a tool")
-                self.context.apply_compaction(_extract_summary(output), cutoff)
+                summary = _extract_summary(output)
+                try:
+                    self._apply_compaction(summary, cutoff, attempt_usage)
+                except Exception as exc:
+                    self._compaction_circuit_open = True
+                    usage += attempt_usage
+                    if usage:
+                        yield UsageEvent(usage)
+                    yield _persistence_error(exc)
+                    return "error"
                 usage += attempt_usage
                 self._compaction_circuit_open = False
                 break
@@ -482,6 +602,67 @@ class Agent:
         if self.plan_file is not None:
             self.plan_file.unlink(missing_ok=True)
 
+    def _startup_compaction(self) -> Generator[AgentEvent, None, None]:
+        if self._startup_checked:
+            return
+        self._startup_checked = True
+        self.context.set_tool_schemas(self.tools.schemas())
+        if self.context.should_compact():
+            status = yield from self._compact(automatic=True)
+            if status != "completed" or self.context.should_compact():
+                yield ErrorEvent(
+                    "Restored session still exceeds the context threshold. "
+                    "Use /new to start an empty session.",
+                    "context_length",
+                )
+
+    def _require_sessions(self) -> Any:
+        if self.session_manager is None:
+            raise RuntimeError("Session persistence is disabled.")
+        return self.session_manager
+
+    def _ensure_session_switch_allowed(self) -> None:
+        if self.context.mode == "plan":
+            raise RuntimeError("Session switching is unavailable in Plan Mode.")
+
+    def _add_user(self, content: str, *, visible: bool = True) -> None:
+        if self.session_manager is None:
+            self.context.add_user(content)
+        else:
+            self.session_manager.commit_message("user", content, visible=visible)
+
+    def _finish_assistant(
+        self,
+        index: int,
+        status: Literal["completed", "error"],
+        token_usage: int = 0,
+    ) -> None:
+        if self.session_manager is None:
+            if status == "completed":
+                self.context.finish_assistant_stream(index, token_usage)
+            else:
+                self.context.fail_assistant_stream(index)
+        else:
+            self.session_manager.commit_assistant_stream(index, status, token_usage)
+
+    def _add_tool_call(self, tool_call: ToolCall) -> None:
+        if self.session_manager is None:
+            self.context.add_tool_call(tool_call)
+        else:
+            self.session_manager.commit_tool_call(tool_call)
+
+    def _add_tool_result(self, tool_call: ToolCall, result: ToolResult) -> None:
+        if self.session_manager is None:
+            self.context.add_tool_result(tool_call.call_id, result.to_model_output())
+        else:
+            self.session_manager.commit_tool_result(tool_call, result)
+
+    def _apply_compaction(self, summary: str, cutoff: int, token_usage: int) -> None:
+        if self.session_manager is None:
+            self.context.apply_compaction(summary, cutoff)
+        else:
+            self.session_manager.commit_compaction(summary, cutoff, token_usage)
+
     def close(self) -> None:
         try:
             close = getattr(self.client, "close", None)
@@ -534,4 +715,20 @@ def _is_context_length_error(error: ErrorEvent) -> bool:
             "input too long",
             "exceeds the maximum number of tokens",
         )
+    )
+
+
+def _persistence_error(exc: Exception) -> ErrorEvent:
+    return ErrorEvent(str(exc), "session_persistence")
+
+
+def _session_state(action: str, snapshot: Any) -> SessionStateEvent:
+    return SessionStateEvent(
+        action,
+        snapshot.session_id,
+        tuple(record.as_dict() for record in snapshot.records),
+        snapshot.token_usage,
+        snapshot.cleaned,
+        snapshot.invalid,
+        snapshot.restored,
     )

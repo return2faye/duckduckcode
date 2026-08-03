@@ -6,10 +6,11 @@ from pathlib import Path
 from .config import Config
 from .core.agent import Agent
 from .core.context import ContextManager
+from .core.event import ConversationEvent, ErrorEvent
 from .core.prompts import build_system_prompt
 from .interfaces.backend import run_backend
 from .interfaces.tui import run_tui
-from .memory import load_instructions
+from .memory import SessionManager, load_instructions
 from .permissions import (
     PathSandbox,
     PermissionChecker,
@@ -32,6 +33,7 @@ from .tools.tool import ToolManager, create_exit_plan_mode_tool
 def main() -> None:
     parser = argparse.ArgumentParser(description="Start a DuckDuckCode chat session.")
     parser.add_argument("--backend", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("prompt", nargs="?", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     agent: Agent | None = None
@@ -41,6 +43,15 @@ def main() -> None:
         if args.backend:
             agent = build_agent(config, workspace)
             run_backend(agent)
+            return
+        if args.prompt:
+            agent = build_agent(config, workspace)
+            for event in agent.stream(args.prompt):
+                if isinstance(event, ConversationEvent):
+                    print(event.delta, end="", flush=True)
+                elif isinstance(event, ErrorEvent):
+                    raise RuntimeError(event.message)
+            print()
             return
         run_tui(
             config.openai_model,
@@ -65,6 +76,7 @@ def build_agent(
     compaction_trigger_tokens: int | None = None,
     compaction_target_tokens: int | None = None,
     include_user_instructions: bool = True,
+    enable_sessions: bool = True,
 ) -> Agent:
     path_sandbox = PathSandbox(workspace)
     try:
@@ -117,6 +129,9 @@ def build_agent(
                 f"{context.auto_compact_tokens} tokens. Shorten DDCODE instructions "
                 "or raise the threshold."
             )
+        session_manager = (
+            SessionManager(workspace, context) if enable_sessions else None
+        )
         return Agent(
             OpenAIClient(
                 api_key=config.openai_api_key,
@@ -133,6 +148,7 @@ def build_agent(
                 policy,
             ),
             plan_file=workspace / ".duckduckcode" / "plan.md",
+            session_manager=session_manager,
         )
     except Exception:
         path_sandbox.close()

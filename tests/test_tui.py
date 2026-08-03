@@ -7,7 +7,7 @@ import queue
 import signal
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from duckduckcode.core.event import (
     ConversationEvent,
@@ -17,6 +17,8 @@ from duckduckcode.core.event import (
     LoopCompleteEvent,
     PermissionRequestEvent,
     PlanReviewEvent,
+    SessionListEvent,
+    SessionStateEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -185,6 +187,65 @@ class TuiTest(unittest.TestCase):
         )
         process.stdin.seek(0)
         self.assertEqual(json.loads(process.stdin.read()), {"type": "status"})
+
+    def test_pipe_backend_initializes_and_lists_sessions(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO(
+                    '{"type": "session_state", "action": "initialized", '
+                    '"session_id": "20260803-120000", "records": [], '
+                    '"token_usage": 9, "cleaned": 1, '
+                    '"invalid": ["broken"], "restored": true}\n'
+                    '{"type": "loop_complete", "reason": "completed", '
+                    '"iterations": 0}\n'
+                    '{"type": "session_list", "sessions": [{"id": "one", '
+                    '"created_at": 1, "last_activity": 2, "status": "valid", '
+                    '"active": true}]}\n'
+                    '{"type": "loop_complete", "reason": "completed", '
+                    '"iterations": 0}\n'
+                )
+
+        process = FakeProcess()
+        backend = PipeBackend(process)
+
+        self.assertEqual(
+            list(backend.initialize()),
+            [
+                SessionStateEvent(
+                    "initialized",
+                    "20260803-120000",
+                    (),
+                    9,
+                    1,
+                    ("broken",),
+                    True,
+                ),
+                LoopCompleteEvent("completed", 0),
+            ],
+        )
+        self.assertEqual(
+            list(backend.sessions()),
+            [
+                SessionListEvent(
+                    (
+                        {
+                            "id": "one",
+                            "created_at": 1,
+                            "last_activity": 2,
+                            "status": "valid",
+                            "active": True,
+                        },
+                    )
+                ),
+                LoopCompleteEvent("completed", 0),
+            ],
+        )
+        process.stdin.seek(0)
+        self.assertEqual(
+            [json.loads(line) for line in process.stdin.read().splitlines()],
+            [{"type": "initialize"}, {"type": "sessions"}],
+        )
 
     def test_pipe_backend_writes_permission_response(self) -> None:
         class FakeProcess:
@@ -405,8 +466,11 @@ class TuiTest(unittest.TestCase):
                     "Available slash commands:\n"
                     "/compact  Compact conversation context\n"
                     "/help  Show available commands\n"
+                    "/delete-session  Permanently delete a session\n"
+                    "/new  Start a new session\n"
                     "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode\n"
+                    "/sessions  List saved sessions\n"
                     "/status  Show context window usage",
                 ),
             ),
@@ -452,9 +516,13 @@ class TuiTest(unittest.TestCase):
         )
         self.assertEqual(
             suggestions("/s"),
-            [("/status", "Show context window usage")],
+            [
+                ("/sessions", "List saved sessions"),
+                ("/status", "Show context window usage"),
+            ],
         )
         self.assertEqual(suggestions("/missing"), [])
+        self.assertEqual(suggestions("/r"), [])
         self.assertIsNone(suggestions("hello"))
         self.assertEqual(
             slash_command_module.handle_slash_command("/compact"),
@@ -463,6 +531,18 @@ class TuiTest(unittest.TestCase):
         self.assertEqual(
             slash_command_module.handle_slash_command("/status"),
             ("status", ""),
+        )
+        self.assertEqual(
+            slash_command_module.handle_slash_command("/sessions"),
+            ("sessions", ""),
+        )
+        self.assertEqual(
+            slash_command_module.handle_slash_command("/resume 20260803-120000"),
+            ("error", "Unknown command '/resume'. Use /help to list commands."),
+        )
+        self.assertEqual(
+            slash_command_module.handle_slash_command("/delete-session"),
+            ("delete_session", ""),
         )
 
     def test_plan_slash_command_switches_backend_without_calling_model(self) -> None:
@@ -534,6 +614,98 @@ class TuiTest(unittest.TestCase):
         self.assertEqual(backend.permission_modes, ["accept_edits"])
         self.assertEqual(tui.messages, [])
         self.assertIsNone(tui._events)
+
+    def test_sessions_event_opens_keyboard_resume_menu(self) -> None:
+        backend = Mock()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.messages = [("duckduckcode", "thinking")]
+        tui._waiting = True
+        tui._events = queue.Queue()
+        tui._events.put(
+            SessionListEvent(
+                (
+                    {
+                        "id": "current",
+                        "last_activity": 2,
+                        "status": "valid",
+                        "active": True,
+                    },
+                    {
+                        "id": "older",
+                        "last_activity": 1,
+                        "status": "valid",
+                        "active": False,
+                    },
+                    {
+                        "id": "broken",
+                        "last_activity": 0,
+                        "status": "invalid",
+                        "active": False,
+                    },
+                )
+            )
+        )
+        tui._events.put(LoopCompleteEvent("completed", 0))
+        tui._events.put(None)
+
+        tui._consume_events()
+
+        self.assertEqual(
+            [option["id"] for option in tui._session_options],
+            ["current", "older", "broken"],
+        )
+        self.assertEqual(tui._session_selection, 0)
+        tui._handle_session_key(curses.KEY_DOWN)
+        self.assertEqual(tui._session_selection, 1)
+        tui._handle_session_key(curses.KEY_DOWN)
+        self.assertEqual(tui._session_selection, 0)
+        tui._handle_session_key(curses.KEY_UP)
+        self.assertEqual(tui._session_selection, 1)
+        with patch.object(tui, "_start_operation") as start:
+            tui._handle_session_key("\n")
+
+        self.assertIsNone(tui._session_options)
+        start.assert_called_once_with(backend.resume_session, "older")
+
+    def test_session_menu_draws_selected_options_and_closes_with_escape(self) -> None:
+        class FakeScreen:
+            def __init__(self) -> None:
+                self.strings = []
+
+            def addstr(self, *args):
+                self.strings.append(args)
+
+            def hline(self, *args):
+                pass
+
+        screen = FakeScreen()
+        tui = _Tui(screen, "model", "/tmp", object())
+        tui._session_options = tuple(
+            {
+                "id": f"session-{index}",
+                "last_activity": index,
+                "status": "invalid" if index == 8 else "valid",
+                "active": index == 9,
+            }
+            for index in range(10)
+        )
+        tui._session_selection = 9
+
+        with (
+            patch("duckduckcode.interfaces.tui._color", return_value=0),
+            patch("duckduckcode.interfaces.tui.curses.ACS_HLINE", 0, create=True),
+        ):
+            tui._draw_session_panel(3, 80, 0)
+
+        rendered = [args[2] for args in screen.strings]
+        self.assertIn("? Select session (10) · Enter select · Esc close", rendered)
+        self.assertEqual(len(rendered), 9)
+        self.assertTrue(
+            any("! session-8" in line and "invalid" in line for line in rendered)
+        )
+        self.assertTrue(rendered[-1].startswith("› * session-9"))
+        tui._handle_session_key("\x1b")
+        self.assertIsNone(tui._session_options)
 
     def test_input_panel_shows_current_permission_mode(self) -> None:
         class FakeScreen:
@@ -610,8 +782,11 @@ class TuiTest(unittest.TestCase):
                     "Available slash commands:\n"
                     "/compact  Compact conversation context\n"
                     "/help  Show available commands\n"
+                    "/delete-session  Permanently delete a session\n"
+                    "/new  Start a new session\n"
                     "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode\n"
+                    "/sessions  List saved sessions\n"
                     "/status  Show context window usage",
                 )
             ],

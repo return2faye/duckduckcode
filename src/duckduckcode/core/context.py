@@ -93,6 +93,7 @@ class ContextManager:
                 "compaction_target_tokens must be below the trigger and context window"
             )
         self._messages: list[Message] = []
+        self.reminder = ""
         self.system_prompt = system_prompt or build_system_prompt(
             workspace,
             mode_instructions=mode_instructions,
@@ -120,6 +121,9 @@ class ContextManager:
 
     def add_assistant(self, content: str) -> None:
         self._messages.append(Message("assistant", content))
+
+    def add_message(self, message: Message) -> None:
+        self._messages.append(message)
 
     def start_assistant_stream(self) -> int:
         self._messages.append(Message("assistant", status="streaming"))
@@ -217,8 +221,6 @@ class ContextManager:
 
     def model_messages(self) -> list[Message]:
         messages = [Message("system", self.system_prompt)]
-        if self.mode == "plan":
-            messages.append(Message("system", PLAN_MODE_REMINDER))
         if self.abstraction:
             messages.append(
                 Message(
@@ -229,6 +231,10 @@ class ContextManager:
                     f"{self.abstraction}",
                 )
             )
+        if self.reminder:
+            messages.append(Message("system", self.reminder))
+        if self.mode == "plan":
+            messages.append(Message("system", PLAN_MODE_REMINDER))
         return messages + self.messages()
 
     def estimated_tokens(self) -> int:
@@ -299,6 +305,22 @@ class ContextManager:
 
     def set_mode(self, mode: Literal["default", "plan"]) -> None:
         self.mode = mode
+
+    def set_reminder(self, reminder: str) -> None:
+        self.reminder = reminder
+
+    def restore(
+        self,
+        messages: list[Message],
+        abstraction: str = "",
+        reminder: str = "",
+    ) -> None:
+        if any(message.status == "streaming" for message in messages):
+            raise ValueError("Cannot restore a streaming message")
+        self._messages = list(messages)
+        self.abstraction = abstraction
+        self.reminder = reminder
+        self.mode = "default"
 
     def tool_schemas(self) -> list[dict[str, Any]]:
         return list(self._tool_schemas)

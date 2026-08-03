@@ -12,6 +12,7 @@ import sys
 import threading
 import unicodedata
 from collections.abc import Iterator
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
@@ -25,6 +26,8 @@ from ..core.event import (
     PermissionChoice,
     PermissionRequestEvent,
     PlanReviewEvent,
+    SessionListEvent,
+    SessionStateEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -47,6 +50,7 @@ TEXT_COLOR = 5
 WAIT_FRAMES = ["thinking .  ", "thinking .. ", "thinking ..."]
 SHORT_TOOL_RESULT_LINES = 10
 SHORT_TOOL_RESULT_CHARS = 1_000
+SESSION_MENU_ROWS = 8
 PERMISSION_OPTIONS: tuple[tuple[PermissionChoice, str], ...] = (
     ("allow_once", "允许一次"),
     ("allow_always", "始终允许"),
@@ -103,6 +107,33 @@ class PipeBackend:
         self.process.stdin.write(json.dumps({"type": "status"}) + "\n")
         self.process.stdin.flush()
 
+        for line in self.process.stdout:
+            event = _event_from_json(json.loads(line))
+            yield event
+            if isinstance(event, LoopCompleteEvent):
+                break
+
+    def initialize(self) -> Iterator[AgentEvent]:
+        return self._request({"type": "initialize"})
+
+    def sessions(self) -> Iterator[AgentEvent]:
+        return self._request({"type": "sessions"})
+
+    def new_session(self) -> Iterator[AgentEvent]:
+        return self._request({"type": "new_session"})
+
+    def resume_session(self, session_id: str) -> Iterator[AgentEvent]:
+        return self._request({"type": "resume_session", "id": session_id})
+
+    def delete_session(self, session_id: str | None = None) -> Iterator[AgentEvent]:
+        request = {"type": "delete_session"}
+        if session_id:
+            request["id"] = session_id
+        return self._request(request)
+
+    def _request(self, request: dict[str, Any]) -> Iterator[AgentEvent]:
+        self.process.stdin.write(json.dumps(request) + "\n")
+        self.process.stdin.flush()
         for line in self.process.stdout:
             event = _event_from_json(json.loads(line))
             yield event
@@ -218,7 +249,10 @@ class _Tui:
         self._permission_mode_open = False
         self._permission_mode_selection = 1
         self.permission_mode = permission_mode
+        self._session_options: tuple[dict[str, Any], ...] | None = None
+        self._session_selection = 0
         self._slash_selection = 0
+        self._delete_confirmation: str | None = None
         self.mode = "default"
 
     def run(self) -> None:
@@ -229,6 +263,16 @@ class _Tui:
         curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
         _set_mouse_tracking(True)
         self.screen.timeout(100)
+        initialize = getattr(self.backend, "initialize", None)
+        if callable(initialize):
+            self.messages.append(("duckduckcode", ""))
+            self._events = queue.Queue()
+            self._waiting = True
+            threading.Thread(
+                target=_read_operation,
+                args=(initialize, self._events),
+                daemon=True,
+            ).start()
         self._draw()
         try:
             while True:
@@ -253,6 +297,9 @@ class _Tui:
                     continue
                 if self._permission_mode_open and key not in {3, "\x03"}:
                     self._handle_permission_mode_key(key)
+                    continue
+                if self._session_options is not None:
+                    self._handle_session_key(key)
                     continue
                 if self._handle_slash_key(key):
                     continue
@@ -343,7 +390,11 @@ class _Tui:
 
         self.scroll_offset = 0
         slash_command = handle_slash_command(prompt)
+        if slash_command is None:
+            self._delete_confirmation = None
         if slash_command is not None:
+            if slash_command[0] != "delete_session":
+                self._delete_confirmation = None
             if slash_command[0] == "mode":
                 self.mode = "default" if self.mode == "plan" else "plan"
                 self.backend.set_mode(self.mode)
@@ -374,6 +425,32 @@ class _Tui:
                     args=(self.backend, self._events),
                     daemon=True,
                 ).start()
+            elif slash_command[0] in {
+                "sessions",
+                "new_session",
+                "delete_session",
+            }:
+                if self.mode == "plan" and slash_command[0] != "sessions":
+                    self.messages.append(
+                        ("error", "Session switching is unavailable in Plan Mode.")
+                    )
+                elif slash_command[0] == "delete_session" and (
+                    self._delete_confirmation != slash_command[1]
+                ):
+                    self._delete_confirmation = slash_command[1]
+                    target = slash_command[1] or "the current session"
+                    self.messages.append(
+                        (
+                            "error",
+                            f"This permanently deletes {target}. Run the same "
+                            "/delete-session command again to confirm.",
+                        )
+                    )
+                else:
+                    self._delete_confirmation = None
+                    method = getattr(self.backend, slash_command[0])
+                    arguments = (slash_command[1],) if slash_command[1] else ()
+                    self._start_operation(method, *arguments)
             else:
                 self.messages.append(slash_command)
             self.input = ""
@@ -394,6 +471,17 @@ class _Tui:
         self.input = ""
         self.cursor_index = 0
         self.selection_anchor = None
+
+    def _start_operation(self, operation: Any, *arguments: str) -> None:
+        self.messages.append(("duckduckcode", ""))
+        self._events = queue.Queue()
+        self._waiting = True
+        self._wait_frame = 0
+        threading.Thread(
+            target=_read_operation,
+            args=(operation, self._events, *arguments),
+            daemon=True,
+        ).start()
 
     def _consume_events(self) -> None:
         if self._events is None:
@@ -455,6 +543,31 @@ class _Tui:
                 self._plan_review_selection = 0
                 self.messages.append(("duckduckcode", event.content))
                 self.messages.append(("duckduckcode", "Plan completed"))
+            elif isinstance(event, SessionStateEvent):
+                self._session_options = None
+                self._load_session(event)
+            elif isinstance(event, SessionListEvent):
+                if self._waiting:
+                    self.messages.pop()
+                    self._waiting = False
+                self._session_options = event.sessions
+                valid_indexes = [
+                    index
+                    for index, info in enumerate(self._session_options)
+                    if info.get("status") == "valid"
+                ]
+                if valid_indexes:
+                    self._session_selection = next(
+                        (
+                            index
+                            for index, info in enumerate(self._session_options)
+                            if info.get("active") and info.get("status") == "valid"
+                        ),
+                        valid_indexes[0],
+                    )
+                else:
+                    self._session_options = None
+                    self.messages.append(("duckduckcode", "No valid saved sessions."))
             elif isinstance(event, UsageEvent):
                 self.tokens += event.total_tokens
             elif isinstance(event, ContextCompactionEvent):
@@ -514,6 +627,58 @@ class _Tui:
                 self._permission_request = None
                 self._plan_review = None
                 self.messages.append(("error", event.message))
+
+    def _load_session(self, event: SessionStateEvent) -> None:
+        self.messages = []
+        self.tool_results = {}
+        self._expanded_tool_results.clear()
+        self.tokens = event.token_usage
+        self.scroll_offset = 0
+        self.mode = "default"
+        for record in event.records:
+            role = record.get("role")
+            value = record.get("context", {})
+            kind = value.get("type")
+            if kind == "message" and value.get("visible", True):
+                content = str(value.get("content", ""))
+                if content:
+                    self.messages.append(
+                        ("you" if role == "user" else "duckduckcode", content)
+                    )
+            elif kind == "tool_call":
+                call_id = str(value.get("call_id", ""))
+                self.messages.append(
+                    (f"tool:{call_id}", f"→ {value.get('name', '')} running…")
+                )
+            elif kind == "tool_result":
+                call_id = str(value.get("call_id", ""))
+                self.tool_results[call_id] = ToolResultEvent(
+                    call_id,
+                    str(value.get("name", "")),
+                    str(value.get("content", "")),
+                    bool(value.get("is_error", False)),
+                )
+                tool_role = f"tool:{call_id}"
+                if not any(role == tool_role for role, _ in self.messages):
+                    self.messages.append(
+                        (tool_role, f"→ {value.get('name', '')} running…")
+                    )
+        verb = "Restored" if event.restored else "Active"
+        self.messages.append(("duckduckcode", f"{verb} session {event.session_id}."))
+        if event.cleaned:
+            self.messages.append(
+                ("duckduckcode", f"Cleaned {event.cleaned} expired session(s).")
+            )
+        if event.invalid:
+            self.messages.append(
+                (
+                    "error",
+                    "Invalid session file(s) were kept: " + ", ".join(event.invalid),
+                )
+            )
+        self.messages.append(("duckduckcode", ""))
+        self._waiting = True
+        self._wait_frame = 0
 
     def _animate_wait(self) -> None:
         if self._events is None or not self._waiting or self._interrupting:
@@ -603,6 +768,34 @@ class _Tui:
         ]
         self.backend.set_permission_mode(self.permission_mode)
         self._permission_mode_open = False
+
+    def _handle_session_key(self, key: object) -> None:
+        options = self._session_options
+        if not options:
+            return
+        if key == curses.KEY_UP:
+            self._move_session_selection(-1)
+            return
+        if key == curses.KEY_DOWN:
+            self._move_session_selection(1)
+            return
+        if key in {3, 27, "\x03", "\x1b"}:
+            self._session_options = None
+            return
+        if key not in {10, 13, "\n", "\r"} or self._events is not None:
+            return
+        session_id = str(options[self._session_selection]["id"])
+        self._session_options = None
+        self._start_operation(self.backend.resume_session, session_id)
+
+    def _move_session_selection(self, delta: int) -> None:
+        assert self._session_options
+        for _ in self._session_options:
+            self._session_selection = (self._session_selection + delta) % len(
+                self._session_options
+            )
+            if self._session_options[self._session_selection].get("status") == "valid":
+                return
 
     def _handle_slash_key(self, key: object) -> bool:
         if self._plan_review is not None:
@@ -784,11 +977,17 @@ class _Tui:
         permission_mode_height = (
             len(PERMISSION_MODE_OPTIONS) + 2 if self._permission_mode_open else 0
         )
+        session_height = (
+            min(len(self._session_options), SESSION_MENU_ROWS) + 2
+            if self._session_options is not None
+            else 0
+        )
         slash_suggestions = (
             slash_command_suggestions(self.input)
             if self._permission_request is None
             and self._plan_review is None
             and not self._permission_mode_open
+            and self._session_options is None
             else None
         )
         if slash_suggestions:
@@ -802,6 +1001,7 @@ class _Tui:
             permission_height
             or plan_review_height
             or permission_mode_height
+            or session_height
             or slash_height
         )
         max_input_rows = max(
@@ -985,6 +1185,12 @@ class _Tui:
                 width,
                 separator,
             )
+        elif self._session_options is not None:
+            self._draw_session_panel(
+                input_y + len(visible_input) + 2,
+                width,
+                separator,
+            )
         elif slash_suggestions is not None:
             self._draw_slash_panel(
                 input_y + len(visible_input) + 2,
@@ -1128,6 +1334,55 @@ class _Tui:
             )
         self.screen.hline(
             top + max(1, len(suggestions)),
+            0,
+            curses.ACS_HLINE,
+            width,
+            separator,
+        )
+
+    def _draw_session_panel(self, top: int, width: int, separator: int) -> None:
+        options = self._session_options
+        if not options:
+            return
+        visible_count = min(len(options), SESSION_MENU_ROWS)
+        start = min(
+            max(0, self._session_selection - visible_count + 1),
+            len(options) - visible_count,
+        )
+        self.screen.addstr(
+            top,
+            0,
+            _clip(
+                f"? Select session ({len(options)}) · Enter select · Esc close",
+                width,
+            ),
+            _color(DUCK_COLOR) | curses.A_BOLD,
+        )
+        for row, index in enumerate(range(start, start + visible_count), start=1):
+            info = options[index]
+            selected = index == self._session_selection
+            timestamp = (
+                datetime.fromtimestamp(int(info.get("last_activity", 0)))
+                .astimezone()
+                .strftime("%Y-%m-%d %H:%M:%S")
+            )
+            valid = info.get("status") == "valid"
+            marker = "*" if info.get("active") else "!" if not valid else " "
+            attributes = _color(TEXT_COLOR if valid else MUTED_COLOR) | (
+                curses.A_REVERSE if selected else 0
+            )
+            self.screen.addstr(
+                top + row,
+                2,
+                _clip(
+                    f"{'›' if selected else ' '} {marker} {info.get('id')}  "
+                    f"{timestamp}{'' if valid else '  invalid'}",
+                    max(1, width - 2),
+                ),
+                attributes,
+            )
+        self.screen.hline(
+            top + visible_count + 1,
             0,
             curses.ACS_HLINE,
             width,
@@ -1338,6 +1593,18 @@ def _event_from_json(data: dict[str, Any]) -> AgentEvent:
             int(data.get("max_tokens", 0)),
             int(data.get("auto_compact_tokens", 0)),
         )
+    if event_type == "session_state":
+        return SessionStateEvent(
+            data.get("action", "initialized"),
+            str(data.get("session_id", "")),
+            tuple(data.get("records", ())),
+            int(data.get("token_usage", 0)),
+            int(data.get("cleaned", 0)),
+            tuple(str(value) for value in data.get("invalid", ())),
+            bool(data.get("restored", False)),
+        )
+    if event_type == "session_list":
+        return SessionListEvent(tuple(data.get("sessions", ())))
     if event_type == "turn_complete":
         return TurnCompleteEvent(int(data.get("iteration", 0)))
     if event_type == "loop_complete":
@@ -1375,6 +1642,20 @@ def _read_compact(backend: PipeBackend, events: queue.Queue[AgentEvent | None]) 
 def _read_status(backend: PipeBackend, events: queue.Queue[AgentEvent | None]) -> None:
     try:
         for event in backend.context_status():
+            events.put(event)
+    except Exception as exc:
+        events.put(ErrorEvent(str(exc)))
+    finally:
+        events.put(None)
+
+
+def _read_operation(
+    operation: Any,
+    events: queue.Queue[AgentEvent | None],
+    *arguments: str,
+) -> None:
+    try:
+        for event in operation(*arguments):
             events.put(event)
     except Exception as exc:
         events.put(ErrorEvent(str(exc)))

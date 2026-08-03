@@ -98,6 +98,22 @@ class ContextStatusEvent:
     auto_compact_tokens: int
 
 
+@dataclass(frozen=True)
+class SessionStateEvent:
+    action: Literal["initialized", "new", "resumed", "deleted"]
+    session_id: str
+    records: tuple[dict[str, Any], ...]
+    token_usage: int = 0
+    cleaned: int = 0
+    invalid: tuple[str, ...] = ()
+    restored: bool = False
+
+
+@dataclass(frozen=True)
+class SessionListEvent:
+    sessions: tuple[dict[str, Any], ...]
+
+
 StreamEvent = ConversationEvent | ToolCallEvent | ErrorEvent | DoneEvent
 AgentEvent = (
     ConversationEvent
@@ -110,5 +126,7 @@ AgentEvent = (
     | UsageEvent
     | ContextCompactionEvent
     | ContextStatusEvent
+    | SessionStateEvent
+    | SessionListEvent
     | ErrorEvent
 )

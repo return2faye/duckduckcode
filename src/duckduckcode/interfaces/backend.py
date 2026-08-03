@@ -16,6 +16,8 @@ from ..core.event import (
     PermissionRequestEvent,
     PlanReviewEvent,
     PlanReviewResponse,
+    SessionListEvent,
+    SessionStateEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -50,6 +52,26 @@ def run_backend(
                     continue
                 if data.get("type") == "set_permission_mode":
                     agent.set_permission_mode(data.get("mode"))
+                    continue
+                if data.get("type") == "initialize":
+                    active = True
+                    _run_events(agent.initialize(), output_stream)
+                    continue
+                if data.get("type") == "sessions":
+                    active = True
+                    _run_events(agent.list_sessions(), output_stream)
+                    continue
+                if data.get("type") == "new_session":
+                    active = True
+                    _run_events(agent.new_session(), output_stream)
+                    continue
+                if data.get("type") == "resume_session":
+                    active = True
+                    _run_events(agent.resume_session(data["id"]), output_stream)
+                    continue
+                if data.get("type") == "delete_session":
+                    active = True
+                    _run_events(agent.delete_session(data.get("id")), output_stream)
                     continue
                 if data.get("type") == "compact":
                     active = True
@@ -109,23 +131,22 @@ def _run_stream(
 
 
 def _run_compact(agent: Agent, output_stream: TextIO) -> None:
-    stream = agent.compact()
-    try:
-        for event in stream:
-            output_stream.write(json.dumps(_event_to_json(event)) + "\n")
-            output_stream.flush()
-    finally:
-        stream.close()
+    _run_events(agent.compact(), output_stream)
 
 
 def _run_status(agent: Agent, output_stream: TextIO) -> None:
-    stream = agent.context_status()
+    _run_events(agent.context_status(), output_stream)
+
+
+def _run_events(stream: object, output_stream: TextIO) -> None:
     try:
         for event in stream:
             output_stream.write(json.dumps(_event_to_json(event)) + "\n")
             output_stream.flush()
     finally:
-        stream.close()
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
 
 
 def _read_permission_response(input_stream: TextIO, call_id: str) -> PermissionChoice:
@@ -210,6 +231,19 @@ def _event_to_json(event: object) -> dict[str, object]:
             "max_tokens": event.max_tokens,
             "auto_compact_tokens": event.auto_compact_tokens,
         }
+    if isinstance(event, SessionStateEvent):
+        return {
+            "type": "session_state",
+            "action": event.action,
+            "session_id": event.session_id,
+            "records": event.records,
+            "token_usage": event.token_usage,
+            "cleaned": event.cleaned,
+            "invalid": event.invalid,
+            "restored": event.restored,
+        }
+    if isinstance(event, SessionListEvent):
+        return {"type": "session_list", "sessions": event.sessions}
     if isinstance(event, TurnCompleteEvent):
         return {"type": "turn_complete", "iteration": event.iteration}
     if isinstance(event, LoopCompleteEvent):

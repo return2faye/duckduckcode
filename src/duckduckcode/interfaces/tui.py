@@ -28,6 +28,7 @@ from ..core.event import (
     PlanReviewEvent,
     SessionListEvent,
     SessionStateEvent,
+    SkillListEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -51,6 +52,7 @@ WAIT_FRAMES = ["thinking .  ", "thinking .. ", "thinking ..."]
 SHORT_TOOL_RESULT_LINES = 10
 SHORT_TOOL_RESULT_CHARS = 1_000
 SESSION_MENU_ROWS = 8
+SKILL_MENU_ROWS = 8
 PERMISSION_OPTIONS: tuple[tuple[PermissionChoice, str], ...] = (
     ("allow_once", "允许一次"),
     ("allow_always", "始终允许"),
@@ -83,8 +85,13 @@ class PipeBackend:
             start_new_session=True,
         )
 
-    def stream(self, message: str) -> Iterator[AgentEvent]:
-        self.process.stdin.write(json.dumps({"message": message}) + "\n")
+    def stream(
+        self, message: str, skills: list[str] | None = None
+    ) -> Iterator[AgentEvent]:
+        request: dict[str, Any] = {"message": message}
+        if skills:
+            request["skills"] = skills
+        self.process.stdin.write(json.dumps(request) + "\n")
         self.process.stdin.flush()
 
         for line in self.process.stdout:
@@ -118,6 +125,9 @@ class PipeBackend:
 
     def sessions(self) -> Iterator[AgentEvent]:
         return self._request({"type": "sessions"})
+
+    def skills(self) -> Iterator[AgentEvent]:
+        return self._request({"type": "skills"})
 
     def new_session(self) -> Iterator[AgentEvent]:
         return self._request({"type": "new_session"})
@@ -251,6 +261,11 @@ class _Tui:
         self.permission_mode = permission_mode
         self._session_options: tuple[dict[str, Any], ...] | None = None
         self._session_selection = 0
+        self._skill_options: list[dict[str, Any]] = []
+        self._skill_menu_open = False
+        self._skill_selection = 0
+        self._selected_skills: set[str] = set()
+        self._skill_menu_original: set[str] | None = None
         self._slash_selection = 0
         self._delete_confirmation: str | None = None
         self.mode = "default"
@@ -300,6 +315,9 @@ class _Tui:
                     continue
                 if self._session_options is not None:
                     self._handle_session_key(key)
+                    continue
+                if self._skill_menu_open:
+                    self._handle_skill_key(key)
                     continue
                 if self._handle_slash_key(key):
                     continue
@@ -389,7 +407,7 @@ class _Tui:
             return
 
         self.scroll_offset = 0
-        slash_command = handle_slash_command(prompt)
+        slash_command = handle_slash_command(prompt, self._skill_options)
         if slash_command is None:
             self._delete_confirmation = None
         if slash_command is not None:
@@ -405,6 +423,25 @@ class _Tui:
                     for index, (mode, _) in enumerate(PERMISSION_MODE_OPTIONS)
                     if mode == self.permission_mode
                 )
+            elif slash_command[0] == "skills":
+                self._skill_menu_open = True
+                self._skill_selection = 0
+                self._skill_menu_original = set(self._selected_skills)
+                self._start_operation(self.backend.skills)
+                self.input = ""
+                self.cursor_index = 0
+                self.selection_anchor = None
+                return
+            elif slash_command[0] == "skill_select":
+                self._selected_skills.add(slash_command[1])
+                self.messages.append(
+                    ("duckduckcode", f"Selected /{slash_command[1]} for next prompt.")
+                )
+            elif slash_command[0] == "skill_send":
+                name, _, skill_prompt = slash_command[1].partition("\n")
+                self._selected_skills.add(name)
+                self._send_prompt(skill_prompt)
+                return
             elif slash_command[0] == "compact":
                 self.messages.append(("duckduckcode", ""))
                 self._events = queue.Queue()
@@ -458,19 +495,27 @@ class _Tui:
             self.selection_anchor = None
             return
 
-        self.messages.append(("you", prompt))
+        self._send_prompt(prompt)
+
+    def _send_prompt(self, prompt: str) -> None:
+        if not prompt:
+            return
+        skills = sorted(self._selected_skills)
+        label = prompt if not skills else f"{prompt}\n\nSkills: " + ", ".join(skills)
+        self.messages.append(("you", label))
         self.messages.append(("duckduckcode", ""))
         self._events = queue.Queue()
         self._waiting = True
         self._wait_frame = 0
         threading.Thread(
             target=_read_stream,
-            args=(self.backend, prompt, self._events),
+            args=(self.backend, prompt, self._events, skills),
             daemon=True,
         ).start()
         self.input = ""
         self.cursor_index = 0
         self.selection_anchor = None
+        self._selected_skills.clear()
 
     def _start_operation(self, operation: Any, *arguments: str) -> None:
         self.messages.append(("duckduckcode", ""))
@@ -568,6 +613,22 @@ class _Tui:
                 else:
                     self._session_options = None
                     self.messages.append(("duckduckcode", "No valid saved sessions."))
+            elif isinstance(event, SkillListEvent):
+                if self._waiting:
+                    self.messages.pop()
+                    self._waiting = False
+                self._skill_options = list(event.skills)
+                self._selected_skills.intersection_update(
+                    str(skill.get("name", "")) for skill in self._skill_options
+                )
+                if self._skill_menu_original is not None:
+                    self._skill_menu_original.intersection_update(
+                        str(skill.get("name", "")) for skill in self._skill_options
+                    )
+                if self._skill_menu_open and not self._skill_options:
+                    self._skill_menu_open = False
+                    self._skill_menu_original = None
+                    self.messages.append(("duckduckcode", "No Skills found."))
             elif isinstance(event, UsageEvent):
                 self.tokens += event.total_tokens
             elif isinstance(event, ContextCompactionEvent):
@@ -788,6 +849,36 @@ class _Tui:
         self._session_options = None
         self._start_operation(self.backend.resume_session, session_id)
 
+    def _handle_skill_key(self, key: object) -> None:
+        if key == curses.KEY_UP:
+            if self._skill_options:
+                self._skill_selection = (self._skill_selection - 1) % len(
+                    self._skill_options
+                )
+            return
+        if key == curses.KEY_DOWN:
+            if self._skill_options:
+                self._skill_selection = (self._skill_selection + 1) % len(
+                    self._skill_options
+                )
+            return
+        if key in {27, "\x1b"}:
+            if self._skill_menu_original is not None:
+                self._selected_skills = self._skill_menu_original
+            self._skill_menu_original = None
+            self._skill_menu_open = False
+            return
+        if key == " " and self._skill_options:
+            name = str(self._skill_options[self._skill_selection].get("name", ""))
+            if name in self._selected_skills:
+                self._selected_skills.remove(name)
+            elif name:
+                self._selected_skills.add(name)
+            return
+        if key in {10, 13, "\n", "\r"}:
+            self._skill_menu_original = None
+            self._skill_menu_open = False
+
     def _move_session_selection(self, delta: int) -> None:
         assert self._session_options
         for _ in self._session_options:
@@ -800,7 +891,7 @@ class _Tui:
     def _handle_slash_key(self, key: object) -> bool:
         if self._plan_review is not None:
             return False
-        suggestions = slash_command_suggestions(self.input)
+        suggestions = slash_command_suggestions(self.input, self._skill_options)
         if suggestions is None:
             return False
         if key == curses.KEY_UP:
@@ -982,12 +1073,20 @@ class _Tui:
             if self._session_options is not None
             else 0
         )
+        skill_height = (
+            min(len(self._skill_options), SKILL_MENU_ROWS) + 2
+            if self._skill_menu_open
+            else 0
+        )
         slash_suggestions = (
-            slash_command_suggestions(self.input)
+            slash_command_suggestions(
+                self.input, self._skill_options, include_tags=True
+            )
             if self._permission_request is None
             and self._plan_review is None
             and not self._permission_mode_open
             and self._session_options is None
+            and not self._skill_menu_open
             else None
         )
         if slash_suggestions:
@@ -1002,6 +1101,7 @@ class _Tui:
             or plan_review_height
             or permission_mode_height
             or session_height
+            or skill_height
             or slash_height
         )
         max_input_rows = max(
@@ -1156,6 +1256,8 @@ class _Tui:
             separator,
         )
         status_left = f"{self.model} · plan" if self.mode == "plan" else self.model
+        if self._selected_skills:
+            status_left += " · skills " + ", ".join(sorted(self._selected_skills))
         status_right = f"{self.tokens:,} tokens"
         self.screen.addstr(
             height - 1, 0, _clip(status_left, width), _color(MUTED_COLOR)
@@ -1187,6 +1289,12 @@ class _Tui:
             )
         elif self._session_options is not None:
             self._draw_session_panel(
+                input_y + len(visible_input) + 2,
+                width,
+                separator,
+            )
+        elif self._skill_menu_open:
+            self._draw_skill_panel(
                 input_y + len(visible_input) + 2,
                 width,
                 separator,
@@ -1309,7 +1417,7 @@ class _Tui:
         top: int,
         width: int,
         separator: int,
-        suggestions: list[tuple[str, str]],
+        suggestions: list[tuple[str, str, str]],
     ) -> None:
         if not suggestions:
             self.screen.addstr(
@@ -1318,18 +1426,25 @@ class _Tui:
                 _clip("No matching commands", max(1, width - 2)),
                 _color(MUTED_COLOR),
             )
-        for index, (name, description) in enumerate(suggestions):
+        for index, suggestion in enumerate(suggestions):
+            name, description = suggestion[:2]
+            tag = suggestion[2] if len(suggestion) > 2 else ""
             attributes = _color(TEXT_COLOR)
             if index == self._slash_selection:
                 attributes |= curses.A_REVERSE
+            prefix = ("› " if index == self._slash_selection else "  ") + (
+                f"{name}  {description}"
+            )
+            if tag:
+                marker = f"[{tag}]"
+                available = max(1, width - 2)
+                prefix = _clip(prefix, max(1, available - _text_width(marker) - 1))
+                space = max(1, available - _text_width(prefix) - _text_width(marker))
+                prefix = prefix + (" " * space) + marker
             self.screen.addstr(
                 top + index,
                 2,
-                _clip(
-                    ("› " if index == self._slash_selection else "  ")
-                    + f"{name}  {description}",
-                    max(1, width - 2),
-                ),
+                _clip(prefix, max(1, width - 2)),
                 attributes,
             )
         self.screen.hline(
@@ -1379,6 +1494,48 @@ class _Tui:
                     f"{timestamp}{'' if valid else '  invalid'}",
                     max(1, width - 2),
                 ),
+                attributes,
+            )
+        self.screen.hline(
+            top + visible_count + 1,
+            0,
+            curses.ACS_HLINE,
+            width,
+            separator,
+        )
+
+    def _draw_skill_panel(self, top: int, width: int, separator: int) -> None:
+        options = self._skill_options
+        if not options:
+            return
+        visible_count = min(len(options), SKILL_MENU_ROWS)
+        start = min(
+            max(0, self._skill_selection - visible_count + 1),
+            len(options) - visible_count,
+        )
+        self.screen.addstr(
+            top,
+            0,
+            _clip(
+                f"? Select Skills ({len(options)}) · Space toggle · Enter done",
+                width,
+            ),
+            _color(DUCK_COLOR) | curses.A_BOLD,
+        )
+        for row, index in enumerate(range(start, start + visible_count), start=1):
+            skill = options[index]
+            selected = index == self._skill_selection
+            name = str(skill.get("name", ""))
+            checked = "*" if name in self._selected_skills else " "
+            attributes = _color(TEXT_COLOR) | (curses.A_REVERSE if selected else 0)
+            label = (
+                f"{'›' if selected else ' '} [{checked}] /{name}  "
+                f"{skill.get('description', '')}"
+            )
+            self.screen.addstr(
+                top + row,
+                2,
+                _clip(label, max(1, width - 2)),
                 attributes,
             )
         self.screen.hline(
@@ -1605,6 +1762,8 @@ def _event_from_json(data: dict[str, Any]) -> AgentEvent:
         )
     if event_type == "session_list":
         return SessionListEvent(tuple(data.get("sessions", ())))
+    if event_type == "skill_list":
+        return SkillListEvent(tuple(data.get("skills", ())))
     if event_type == "turn_complete":
         return TurnCompleteEvent(int(data.get("iteration", 0)))
     if event_type == "loop_complete":
@@ -1618,10 +1777,14 @@ def _event_from_json(data: dict[str, Any]) -> AgentEvent:
 
 
 def _read_stream(
-    backend: PipeBackend, prompt: str, events: queue.Queue[AgentEvent | None]
+    backend: PipeBackend,
+    prompt: str,
+    events: queue.Queue[AgentEvent | None],
+    skills: list[str] | None = None,
 ) -> None:
     try:
-        for event in backend.stream(prompt):
+        stream = backend.stream(prompt, skills) if skills else backend.stream(prompt)
+        for event in stream:
             events.put(event)
     except Exception as exc:
         events.put(ErrorEvent(str(exc)))

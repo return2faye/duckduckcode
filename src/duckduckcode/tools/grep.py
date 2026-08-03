@@ -4,7 +4,7 @@ import io
 import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .glob import _matches_glob
 from .tool import Tool, ToolResult, create_tool
@@ -46,18 +46,29 @@ GREP_PARAMS = {
 
 def create_grep_tool(
     working_directory: Path | None = None,
-    allowed_directories: tuple[Path, ...] | None = None,
+    allowed_directories: (
+        tuple[Path, ...] | Callable[[], tuple[Path, ...]] | None
+    ) = None,
 ) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
-    allowed = tuple(
-        path.resolve() for path in (allowed_directories or (base_directory,))
+    allowed = (
+        allowed_directories
+        if callable(allowed_directories)
+        else tuple(
+            path.resolve() for path in (allowed_directories or (base_directory,))
+        )
     )
     return create_tool(
         "Grep",
         "Use Grep to search file contents with a regular expression when looking for definitions, references, or error text. Provide an absolute search root inside an allowed directory, or null for the working directory; relative roots are accepted only for compatibility. Use glob to filter relative file paths, context for nearby lines, then ReadFile before EditFile. Returns up to 100 matching lines.",
         GREP_PARAMS,
         lambda pattern, path, glob, context: _grep(
-            base_directory, allowed, pattern, path, glob, context
+            base_directory,
+            allowed() if callable(allowed) else allowed,
+            pattern,
+            path,
+            glob,
+            context,
         ),
         _validate_arguments,
         is_read_only=True,

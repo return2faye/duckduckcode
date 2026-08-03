@@ -291,6 +291,41 @@ class BackendTest(unittest.TestCase):
             ],
         )
 
+    def test_backend_passes_selected_skills_to_stream(self) -> None:
+        calls = []
+
+        class FakeAgent:
+            def stream(self, message, selected_skills=()):
+                calls.append((message, selected_skills))
+                yield LoopCompleteEvent("completed", 1)
+
+        run_backend(
+            FakeAgent(),
+            input_stream=io.StringIO(
+                '{"message": "hello", "skills": ["demo", "other"]}\n'
+            ),
+            output_stream=io.StringIO(),
+        )
+
+        self.assertEqual(calls, [("hello", ["demo", "other"])])
+
+    def test_backend_rejects_malformed_selected_skills(self) -> None:
+        class FakeAgent:
+            def stream(self, message, selected_skills=()):
+                raise AssertionError("stream should not run")
+
+        output = io.StringIO()
+        run_backend(
+            FakeAgent(),
+            input_stream=io.StringIO('{"message": "hello", "skills": [""]}\n'),
+            output_stream=output,
+        )
+
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(events[0]["code"], "error")
+        self.assertIn("non-empty exact skill names", events[0]["message"])
+        self.assertEqual(events[-1]["reason"], "error")
+
     def test_backend_survives_interrupted_stream(self) -> None:
         class FakeAgent:
             def stream(self, message):

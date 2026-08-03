@@ -85,6 +85,71 @@ reaches the compaction threshold. `duckduckcode-eval` loads instruction files fr
 its fixture workspace but excludes the machine's user-level file for reproducible
 runs.
 
+## Skills
+
+DuckDuckCode discovers Skills from two directories on startup and before each
+user turn:
+
+- user: `~/.duckduckcode/skills/`
+- project: `<workspace>/.duckduckcode/skills/`
+
+Entries can be either `skills/name.md` files or `skills/name/SKILL.md`
+directories. Project Skills override user Skills with the same `name`; duplicate
+names inside one scope are skipped. The agent does not create these directories
+or add them to `.gitignore`, so project Skills can be committed.
+
+Each entry is a UTF-8 Markdown file with YAML frontmatter:
+
+```markdown
+---
+name: debug-tests
+description: Debug failing Python tests.
+mode: inline
+---
+
+Skill instructions go here.
+```
+
+`name` is required, must be lowercase kebab-case up to 64 characters, and becomes
+the slash command `/<name>`. `description` is required. `mode` is optional and
+defaults to `inline`; `fork` runs the Skill in an isolated child Agent. Unknown
+frontmatter fields are preserved but unused.
+
+Invalid Skills do not stop startup. Symlinks, non-regular files, duplicate YAML
+fields, invalid YAML, empty bodies, invalid modes, command-name conflicts, and
+files larger than 256KiB are skipped and reported once per changed warning set
+through `ErrorEvent(code="skill")`.
+
+Only the Skill catalog (`name` and `description`) is injected before loading.
+When the model or user selects a Skill, the read-only `LoadSkill` tool loads the
+full body for the current turn only. Inline Skills enter the parent Agent's
+active system block. Fork Skills receive the parent history through the current
+user message, abstraction, memory, system instructions, mode, permission policy,
+and a separate client and tool runtime; Skills and sessions are disabled in the
+child. Child tool activity and usage remain visible, with prefixed call IDs, but
+only the final child reply is returned through the parent's `LoadSkill` result.
+Child failure becomes an error tool result so the parent can recover. Skill
+bodies are not written to sessions, summarized during compaction, or retained
+after success, failure, or interruption. `ContextManager.model_messages()` keeps
+the main system prompt first, optional abstraction second, then memory, Skill
+catalog, active Skills, reminders, mode instructions, and conversation messages.
+
+Directory Skills temporarily grant `ReadFile`, `Glob`, and `Grep` read access to
+that Skill directory while active. File Skills do not expose their parent
+directory. `WriteFile` and `EditFile` remain limited to the workspace and private
+temporary directories; project Skill files follow normal workspace permissions,
+while user Skill files are not writable through file tools. `full_access` Bash
+keeps its existing behavior.
+
+Use `/skills` to refresh the list and open a multi-select menu for the next
+prompt. Each Skill also registers as `/<name>`: the bare command selects it for
+the next prompt, and `/<name> <prompt>` sends the prompt immediately with that
+Skill selected. Explicit selections are loaded before the first model request;
+the model can still call `LoadSkill` for additional matching Skills from the
+catalog. Selections clear after the message is accepted. `duckduckcode-eval`
+passes `enable_skills=False`, so evaluations do not read user or project Skill
+paths.
+
 The default model is `o4-mini`, a reasoning model. Reasoning effort defaults to `low`; CLI selection can be added later.
 
 `OpenAIClient.stream()` uses Responses API SSE streaming and yields internal stream events. The parser currently handles text deltas, function tool calls, errors, and completion.

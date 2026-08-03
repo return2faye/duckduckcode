@@ -114,6 +114,11 @@ class SessionListEvent:
     sessions: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class SkillListEvent:
+    skills: tuple[dict[str, Any], ...]
+
+
 StreamEvent = ConversationEvent | ToolCallEvent | ErrorEvent | DoneEvent
 AgentEvent = (
     ConversationEvent
@@ -128,5 +133,6 @@ AgentEvent = (
     | ContextStatusEvent
     | SessionStateEvent
     | SessionListEvent
+    | SkillListEvent
     | ErrorEvent
 )

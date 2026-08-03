@@ -8,6 +8,7 @@ from .core.agent import Agent
 from .core.context import ContextManager
 from .core.event import ConversationEvent, ErrorEvent
 from .core.prompts import build_system_prompt
+from .core.skill import SkillManager
 from .interfaces.backend import run_backend
 from .interfaces.tui import run_tui
 from .memory import MemoryManager, SessionManager, load_instructions
@@ -27,7 +28,7 @@ from .tools import (
     create_write_file_tool,
 )
 from .tools.os_sandbox import OSSandbox
-from .tools.tool import ToolManager, create_exit_plan_mode_tool
+from .tools.tool import ToolManager, create_exit_plan_mode_tool, create_load_skill_tool
 
 
 def main() -> None:
@@ -80,6 +81,8 @@ def build_agent(
     include_user_instructions: bool = True,
     enable_sessions: bool = True,
     enable_memory: bool = True,
+    enable_skills: bool = True,
+    enable_exit_plan_mode: bool = True,
 ) -> Agent:
     path_sandbox = PathSandbox(workspace)
     try:
@@ -90,13 +93,25 @@ def build_agent(
             lambda: policy is not None and policy.permission_mode != "full_access",
         )
         tools = ToolManager()
+        skill_manager = (
+            SkillManager(workspace, builtin_commands=_builtin_slash_commands())
+            if enable_skills
+            else None
+        )
         tools.register(create_read_file_tool(workspace))
         tools.register(create_write_file_tool(workspace))
         tools.register(create_edit_file_tool(workspace))
-        tools.register(create_glob_tool(workspace, path_sandbox.allowed_directories))
-        tools.register(create_grep_tool(workspace, path_sandbox.allowed_directories))
+        tools.register(
+            create_glob_tool(workspace, path_sandbox.current_allowed_directories)
+        )
+        tools.register(
+            create_grep_tool(workspace, path_sandbox.current_allowed_directories)
+        )
         tools.register(create_bash_tool(workspace, os_sandbox))
-        tools.register(create_exit_plan_mode_tool())
+        if enable_exit_plan_mode:
+            tools.register(create_exit_plan_mode_tool())
+        if skill_manager is not None:
+            tools.register(create_load_skill_tool(skill_manager.load))
         policy = RulePolicy.load(
             workspace,
             path_sandbox.temporary_directory,
@@ -104,7 +119,8 @@ def build_agent(
                 schema["name"]
                 for schema in tools.schemas()
                 if schema["name"] != "ExitPlanMode"
-            },
+            }
+            | {"LoadSkill"},
         )
         memory_manager = MemoryManager(workspace) if enable_memory else None
         memory_snapshot = (
@@ -158,10 +174,45 @@ def build_agent(
             plan_file=workspace / ".duckduckcode" / "plan.md",
             session_manager=session_manager,
             memory_manager=memory_manager,
+            skill_manager=skill_manager,
+            skill_root_callback=path_sandbox.set_skill_directories,
+            fork_agent_factory=(
+                (
+                    lambda: build_agent(
+                        config,
+                        workspace,
+                        max_iterations=max_iterations,
+                        context_window_tokens=context_window_tokens,
+                        compaction_trigger_tokens=compaction_trigger_tokens,
+                        compaction_target_tokens=compaction_target_tokens,
+                        include_user_instructions=include_user_instructions,
+                        enable_sessions=False,
+                        enable_memory=False,
+                        enable_skills=False,
+                        enable_exit_plan_mode=False,
+                    )
+                )
+                if skill_manager is not None
+                else None
+            ),
         )
     except Exception:
         path_sandbox.close()
         raise
+
+
+def _builtin_slash_commands() -> set[str]:
+    return {
+        "/compact",
+        "/delete-session",
+        "/help",
+        "/new",
+        "/permissions",
+        "/plan",
+        "/sessions",
+        "/skills",
+        "/status",
+    }
 
 
 if __name__ == "__main__":

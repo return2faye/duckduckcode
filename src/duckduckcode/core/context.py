@@ -102,6 +102,8 @@ class ContextManager:
         )
         self.abstraction = abstraction
         self.long_term_memory = long_term_memory
+        self.skill_catalog = ""
+        self.active_skills = ""
         self.reasoning = reasoning or ReasoningConfig()
         self._tool_schemas = tool_schemas or []
         self._tool_result_base = (
@@ -235,6 +237,10 @@ class ContextManager:
             )
         if self.long_term_memory:
             messages.append(Message("system", self.long_term_memory))
+        if self.skill_catalog:
+            messages.append(Message("system", self.skill_catalog))
+        if self.active_skills:
+            messages.append(Message("system", self.active_skills))
         if self.reminder:
             messages.append(Message("system", self.reminder))
         if self.mode == "plan":
@@ -324,6 +330,12 @@ class ContextManager:
 
     def set_long_term_memory(self, memory: str) -> None:
         self.long_term_memory = memory
+
+    def set_skill_catalog(self, catalog: str) -> None:
+        self.skill_catalog = catalog
+
+    def set_active_skills(self, skills: str) -> None:
+        self.active_skills = skills
 
     def restore(
         self,

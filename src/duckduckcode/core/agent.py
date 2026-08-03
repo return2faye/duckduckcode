@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from copy import deepcopy
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
+from uuid import uuid4
 
 from .client import Client
 from .context import (
@@ -24,12 +26,14 @@ from .event import (
     PlanReviewResponse,
     SessionListEvent,
     SessionStateEvent,
+    SkillListEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
     UsageEvent,
 )
 from .prompts import COMPACTION_SYSTEM_PROMPT
+from .skill import SkillManager
 from ..permissions import PermissionChecker, PermissionMode
 from ..tools.tool import ToolCall, ToolManager, ToolResult
 
@@ -49,6 +53,9 @@ class Agent:
         plan_file: str | Path | None = None,
         session_manager: object | None = None,
         memory_manager: object | None = None,
+        skill_manager: SkillManager | None = None,
+        skill_root_callback: Any | None = None,
+        fork_agent_factory: Callable[[], Agent] | None = None,
     ) -> None:
         if (
             isinstance(max_iterations, bool)
@@ -64,6 +71,10 @@ class Agent:
         self.plan_file = Path(plan_file).resolve() if plan_file is not None else None
         self.session_manager = session_manager
         self.memory_manager = memory_manager
+        self.skill_manager = skill_manager
+        self._skill_root_callback = skill_root_callback
+        self._fork_agent_factory = fork_agent_factory
+        self._skill_list_snapshot: tuple[dict[str, Any], ...] | None = None
         self._session_snapshot = (
             session_manager.start() if session_manager is not None else None
         )
@@ -93,6 +104,7 @@ class Agent:
     def initialize(self) -> Generator[AgentEvent, None, None]:
         if self._session_snapshot is not None:
             yield _session_state("initialized", self._session_snapshot)
+        yield from self._refresh_skills(force=True)
         yield from self._startup_compaction()
         yield LoopCompleteEvent("completed", 0)
 
@@ -155,14 +167,19 @@ class Agent:
         )
         yield LoopCompleteEvent("completed", 0)
 
-    def stream(self, user_message: str) -> Generator[AgentEvent, AgentResponse, None]:
+    def stream(
+        self, user_message: str, selected_skills: list[str] | tuple[str, ...] = ()
+    ) -> Generator[AgentEvent, AgentResponse, None]:
         self.permission_checker.start_task()
         try:
-            yield from self._stream(user_message)
+            yield from self._stream(user_message, selected_skills)
         finally:
+            self._clear_active_skills()
             self.permission_checker.finish_task()
 
-    def _stream(self, user_message: str) -> Generator[AgentEvent, AgentResponse, None]:
+    def _stream(
+        self, user_message: str, selected_skills: list[str] | tuple[str, ...]
+    ) -> Generator[AgentEvent, AgentResponse, None]:
         memory_start = (
             len(self.session_manager.snapshot().records)
             if self.memory_manager is not None and self.session_manager is not None
@@ -173,6 +190,7 @@ class Agent:
             self.context.set_long_term_memory(memory)
             if warning:
                 yield ErrorEvent(warning, "memory")
+        yield from self._refresh_skills()
         try:
             self._add_user(user_message)
         except Exception as exc:
@@ -180,6 +198,48 @@ class Agent:
             yield LoopCompleteEvent("error", 0)
             return
         self.context.set_tool_schemas(self.tools.schemas())
+        if selected_skills:
+            calls = []
+            results_by_id: dict[str, tuple[ToolCall, ToolResult]] = {}
+            for name in sorted(set(selected_skills)):
+                calls.append(
+                    ToolCall(
+                        f"selected_skill_{uuid4().hex}",
+                        "LoadSkill",
+                        {"name": name, "task": user_message},
+                    )
+                )
+            try:
+                for tool_call in calls:
+                    self._add_tool_call(tool_call)
+                    yield ToolCallEvent(tool_call)
+                completed = yield from self._execute_tools(calls)
+                results_by_id = {
+                    tool_call.call_id: (tool_call, result)
+                    for tool_call, result in completed
+                }
+                for tool_call, result in completed:
+                    self._add_tool_result(tool_call, result)
+                    yield ToolResultEvent(
+                        tool_call.call_id,
+                        tool_call.name,
+                        result.content,
+                        result.is_error,
+                    )
+            except KeyboardInterrupt:
+                for tool_call in calls:
+                    if tool_call.call_id not in results_by_id:
+                        self._add_tool_result(
+                            tool_call,
+                            ToolResult("Tool execution was interrupted.", True),
+                        )
+                yield ErrorEvent("interrupted", "interrupted")
+                yield LoopCompleteEvent("cancelled", 0)
+                return
+            except Exception as exc:
+                yield _persistence_error(exc)
+                yield LoopCompleteEvent("error", 0)
+                return
         plan_execution_pending = False
         approved_plan_active = False
         plan_execution_failed = False
@@ -536,7 +596,7 @@ class Agent:
         return "completed"
 
     def _execute_tools(self, tool_calls: list[ToolCall]) -> Generator[
-        PermissionRequestEvent | PlanReviewEvent,
+        AgentEvent,
         AgentResponse,
         list[tuple[ToolCall, ToolResult]],
     ]:
@@ -583,8 +643,197 @@ class Agent:
                     )
                 continue
             completed.append((tool_call, ToolResult(decision.message, is_error=True)))
-        completed.extend(self.tools.execute_many(allowed))
+        skill_calls = sorted(
+            (call for call in allowed if call.name == "LoadSkill"),
+            key=lambda call: str(call.arguments.get("name", "")),
+        )
+        for tool_call in skill_calls:
+            skill = (
+                self.skill_manager.get(str(tool_call.arguments.get("name", "")))
+                if self.skill_manager is not None
+                else None
+            )
+            result = (
+                (yield from self._run_fork_skill(tool_call))
+                if skill is not None and skill.mode == "fork"
+                else self.tools.execute(tool_call)
+            )
+            completed.append((tool_call, result))
+            self._sync_active_skills()
+        completed.extend(
+            self.tools.execute_many(
+                [call for call in allowed if call.name != "LoadSkill"]
+            )
+        )
+        self._sync_active_skills()
         return completed
+
+    def list_skills(self) -> Generator[AgentEvent, None, None]:
+        yield from self._refresh_skills(force=True)
+        yield LoopCompleteEvent("completed", 0)
+
+    def _refresh_skills(self, force: bool = False) -> Generator[AgentEvent, None, None]:
+        if self.skill_manager is None:
+            self.context.set_skill_catalog("")
+            return
+        skills, warning = self.skill_manager.refresh()
+        self.context.set_skill_catalog(self.skill_manager.catalog_block())
+        snapshot = tuple(
+            {
+                "name": skill.name,
+                "description": skill.description,
+                "mode": skill.mode,
+                "scope": skill.scope,
+            }
+            for skill in skills
+        )
+        if force or snapshot != self._skill_list_snapshot:
+            self._skill_list_snapshot = snapshot
+            yield SkillListEvent(snapshot)
+        if warning:
+            yield ErrorEvent(warning, "skill")
+
+    def _run_fork_skill(
+        self, tool_call: ToolCall
+    ) -> Generator[AgentEvent, AgentResponse, ToolResult]:
+        if self.skill_manager is None or self._fork_agent_factory is None:
+            return ToolResult("Fork Skills are unavailable in this Agent.", True)
+        tool = self.tools.get("LoadSkill")
+        try:
+            arguments = tool.validator(dict(tool_call.arguments)) if tool else {}
+        except Exception as exc:
+            return ToolResult(str(exc), True)
+        skill, block, error = self.skill_manager.load_fork(
+            arguments["name"], arguments["task"]
+        )
+        if error is not None:
+            return error
+        assert skill is not None and block is not None
+
+        messages = self.context.messages()
+        user_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if messages[index].kind == "message" and messages[index].role == "user"
+            ),
+            None,
+        )
+        if user_index is None:
+            return ToolResult("Fork Skill has no current user message.", True)
+
+        child: Agent | None = None
+        child_stream: Generator[AgentEvent, AgentResponse, None] | None = None
+        child_errors: list[str] = []
+        reason: str | None = None
+        history = deepcopy(messages[:user_index])
+        try:
+            child = self._fork_agent_factory()
+            child.context.system_prompt = _fork_system_prompt(
+                self.context.system_prompt, child.context.system_prompt
+            )
+            child.context.long_term_memory = self.context.long_term_memory
+            child.context.reasoning = self.context.reasoning
+            child.context.restore(
+                history,
+                self.context.abstraction,
+                self.context.reminder,
+            )
+            child.context.set_mode(self.context.mode)
+            child.context.set_active_skills(block)
+            child.context.set_tool_schemas(child.tools.schemas())
+            if child._skill_root_callback is not None and skill.root is not None:
+                child._skill_root_callback((skill.root,))
+            if (
+                child.permission_checker.permission_mode
+                != self.permission_checker.permission_mode
+            ):
+                child.set_permission_mode(self.permission_checker.permission_mode)
+
+            child_stream = child.stream(messages[user_index].content)
+            try:
+                event = next(child_stream)
+                while True:
+                    if isinstance(event, PermissionRequestEvent):
+                        choice = yield PermissionRequestEvent(
+                            f"{tool_call.call_id}/{event.call_id}",
+                            event.name,
+                            event.content,
+                            event.message,
+                        )
+                        event = child_stream.send(choice)
+                        continue
+                    if isinstance(event, ToolCallEvent):
+                        yield ToolCallEvent(
+                            ToolCall(
+                                f"{tool_call.call_id}/{event.tool_call.call_id}",
+                                event.tool_call.name,
+                                event.tool_call.arguments,
+                            )
+                        )
+                    elif isinstance(event, ToolResultEvent):
+                        yield ToolResultEvent(
+                            f"{tool_call.call_id}/{event.call_id}",
+                            event.name,
+                            event.content,
+                            event.is_error,
+                        )
+                    elif isinstance(event, UsageEvent):
+                        yield event
+                    elif isinstance(event, ErrorEvent):
+                        child_errors.append(event.message)
+                    elif isinstance(event, LoopCompleteEvent):
+                        reason = event.reason
+                    event = next(child_stream)
+            except StopIteration:
+                pass
+
+            if reason == "cancelled":
+                raise KeyboardInterrupt
+            final = next(
+                (
+                    message.content
+                    for message in reversed(child.context.messages()[len(history) :])
+                    if message.kind == "message"
+                    and message.role == "assistant"
+                    and message.status == "completed"
+                    and message.content.strip()
+                ),
+                "",
+            )
+            if reason == "completed" and final:
+                return ToolResult(final)
+            detail = child_errors[-1] if child_errors else reason or "no final response"
+            return ToolResult(f"Fork Skill '{skill.name}' failed: {detail}.", True)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            return ToolResult(f"Fork Skill '{skill.name}' failed: {exc}", True)
+        finally:
+            if child_stream is not None:
+                try:
+                    child_stream.close()
+                except Exception:
+                    pass
+            if child is not None:
+                try:
+                    child.close()
+                except Exception:
+                    pass
+
+    def _sync_active_skills(self) -> None:
+        if self.skill_manager is None:
+            return
+        self.context.set_active_skills(self.skill_manager.active_block())
+        if self._skill_root_callback is not None:
+            self._skill_root_callback(tuple(self.skill_manager.active_roots.values()))
+
+    def _clear_active_skills(self) -> None:
+        if self.skill_manager is not None:
+            self.skill_manager.clear_active()
+        self.context.set_active_skills("")
+        if self._skill_root_callback is not None:
+            self._skill_root_callback(())
 
     def _review_plan(
         self,
@@ -715,6 +964,18 @@ def _extract_summary(output: str) -> str:
     if not summary:
         raise RuntimeError("the model returned an empty summary")
     return summary
+
+
+def _fork_system_prompt(parent: str, child: str) -> str:
+    start = "User and project instructions:\n"
+    end = "\n\nMode instructions:"
+    parent_start = parent.find(start)
+    child_start = child.find(start)
+    parent_end = parent.find(end, parent_start)
+    child_end = child.find(end, child_start)
+    if min(parent_start, child_start, parent_end, child_end) < 0:
+        return parent
+    return child[:child_start] + parent[parent_start:parent_end] + child[child_end:]
 
 
 def _error_from_exception(exc: Exception) -> ErrorEvent:

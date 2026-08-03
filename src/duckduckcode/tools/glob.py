@@ -4,7 +4,7 @@ from fnmatch import fnmatchcase
 from functools import cache
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .tool import Tool, ToolResult, create_tool
 
@@ -36,17 +36,28 @@ GLOB_PARAMS = {
 
 def create_glob_tool(
     working_directory: Path | None = None,
-    allowed_directories: tuple[Path, ...] | None = None,
+    allowed_directories: (
+        tuple[Path, ...] | Callable[[], tuple[Path, ...]] | None
+    ) = None,
 ) -> Tool:
     base_directory = (working_directory or Path.cwd()).resolve()
-    allowed = tuple(
-        path.resolve() for path in (allowed_directories or (base_directory,))
+    allowed = (
+        allowed_directories
+        if callable(allowed_directories)
+        else tuple(
+            path.resolve() for path in (allowed_directories or (base_directory,))
+        )
     )
     return create_tool(
         "Glob",
         "Use Glob to find file paths by name or project structure before ReadFile, Grep, or EditFile. Provide a relative glob pattern such as **/*.py and an absolute search root inside an allowed directory, or null for the working directory; relative roots are accepted only for compatibility. Supports recursive **, excludes noisy and symbolic-link directories, and returns up to 200 newest files first.",
         GLOB_PARAMS,
-        lambda pattern, path: _glob(base_directory, allowed, pattern, path),
+        lambda pattern, path: _glob(
+            base_directory,
+            allowed() if callable(allowed) else allowed,
+            pattern,
+            path,
+        ),
         _validate_arguments,
         is_read_only=True,
         is_concurrency_safe=True,

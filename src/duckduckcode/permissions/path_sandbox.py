@@ -7,6 +7,7 @@ import tempfile
 from ..tools.tool import ToolCall
 
 _PATH_TOOLS = frozenset({"ReadFile", "WriteFile", "EditFile", "Glob", "Grep"})
+_SKILL_READ_TOOLS = frozenset({"ReadFile", "Glob", "Grep"})
 
 
 class PathSandbox:
@@ -28,7 +29,14 @@ class PathSandbox:
             self.temporary_directory,
             self.tool_result_directory,
         )
+        self._skill_directories: tuple[Path, ...] = ()
         self._active = True
+
+    def set_skill_directories(self, directories: tuple[Path, ...]) -> None:
+        self._skill_directories = tuple(path.resolve() for path in directories)
+
+    def current_allowed_directories(self) -> tuple[Path, ...]:
+        return self.allowed_directories + self._skill_directories
 
     def __call__(self, tool_call: ToolCall) -> str | None:
         if tool_call.name not in _PATH_TOOLS:
@@ -52,7 +60,12 @@ class PathSandbox:
                 "could not be resolved safely."
             )
 
-        if any(resolved.is_relative_to(root) for root in self.allowed_directories):
+        roots = (
+            self.current_allowed_directories()
+            if tool_call.name in _SKILL_READ_TOOLS
+            else self.allowed_directories
+        )
+        if any(resolved.is_relative_to(root) for root in roots):
             return None
         return (
             f"Permission denied: {tool_call.name} path '{candidate}' resolves "

@@ -95,6 +95,36 @@ def create_exit_plan_mode_tool() -> Tool:
     )
 
 
+LOAD_SKILL_PARAMS = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "Exact discovered skill name.",
+        },
+        "task": {
+            "type": "string",
+            "description": "Current goal or concrete task for the skill.",
+        },
+    },
+    "required": ["name", "task"],
+    "additionalProperties": False,
+}
+
+
+def create_load_skill_tool(handler: Callable[..., Any]) -> Tool:
+    return create_tool(
+        "LoadSkill",
+        "Load one discovered Skill by exact name for the current user turn. "
+        "Call this before solving when the skill catalog matches the user's intent.",
+        LOAD_SKILL_PARAMS,
+        handler,
+        _validate_load_skill,
+        is_read_only=True,
+        category="search",
+    )
+
+
 class ToolManager:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
@@ -211,3 +241,18 @@ class ToolManager:
 
 def _identity(arguments: dict[str, Any]) -> dict[str, Any]:
     return arguments
+
+
+def _validate_load_skill(arguments: dict[str, Any]) -> dict[str, Any]:
+    unsupported = sorted(arguments.keys() - {"name", "task"})
+    if unsupported:
+        raise ValueError(
+            "LoadSkill failed: unsupported parameter(s): " + ", ".join(unsupported)
+        )
+    name = arguments.get("name")
+    task = arguments.get("task")
+    if not isinstance(name, str) or not name:
+        raise ValueError("LoadSkill failed: 'name' must be a non-empty string.")
+    if not isinstance(task, str) or not task:
+        raise ValueError("LoadSkill failed: 'task' must be a non-empty string.")
+    return {"name": name, "task": task}

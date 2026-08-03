@@ -18,6 +18,7 @@ from ..core.event import (
     PlanReviewResponse,
     SessionListEvent,
     SessionStateEvent,
+    SkillListEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -81,9 +82,14 @@ def run_backend(
                     active = True
                     _run_status(agent, output_stream)
                     continue
+                if data.get("type") == "skills":
+                    active = True
+                    _run_events(agent.list_skills(), output_stream)
+                    continue
                 message = data["message"]
+                skills = _validate_skills(data.get("skills", []))
                 active = True
-                _run_stream(agent, message, input_stream, output_stream)
+                _run_stream(agent, message, skills, input_stream, output_stream)
             except KeyboardInterrupt:
                 for event in (
                     ErrorEvent("interrupted", "interrupted"),
@@ -107,10 +113,15 @@ def run_backend(
 def _run_stream(
     agent: Agent,
     message: str,
+    skills: list[str],
     input_stream: TextIO,
     output_stream: TextIO,
 ) -> None:
-    stream = agent.stream(message)
+    stream = (
+        agent.stream(message, selected_skills=skills)
+        if skills
+        else agent.stream(message)
+    )
     try:
         event = next(stream)
         while True:
@@ -180,6 +191,14 @@ def _read_plan_review_response(input_stream: TextIO) -> PlanReviewResponse:
     return PlanReviewResponse(approved, feedback)
 
 
+def _validate_skills(value: object) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise RuntimeError("'skills' must be a list of skill names.")
+    if any(not item or item != item.strip() for item in value):
+        raise RuntimeError("'skills' must contain non-empty exact skill names.")
+    return value
+
+
 def _event_to_json(event: object) -> dict[str, object]:
     if isinstance(event, ConversationEvent):
         return {"type": "stream_text", "delta": event.delta}
@@ -244,6 +263,8 @@ def _event_to_json(event: object) -> dict[str, object]:
         }
     if isinstance(event, SessionListEvent):
         return {"type": "session_list", "sessions": event.sessions}
+    if isinstance(event, SkillListEvent):
+        return {"type": "skill_list", "skills": event.skills}
     if isinstance(event, TurnCompleteEvent):
         return {"type": "turn_complete", "iteration": event.iteration}
     if isinstance(event, LoopCompleteEvent):

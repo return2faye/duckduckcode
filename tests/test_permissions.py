@@ -388,6 +388,30 @@ class PathSandboxTest(unittest.TestCase):
                 stat.S_IMODE(sandbox.temporary_directory.stat().st_mode), 0o700
             )
 
+    def test_skill_directories_are_read_only_roots(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            tempfile.TemporaryDirectory() as temporary_parent,
+            tempfile.TemporaryDirectory() as skill_directory,
+        ):
+            sandbox = PathSandbox(
+                Path(workspace), temporary_parent=Path(temporary_parent)
+            )
+            self.addCleanup(sandbox.close)
+            skill_path = Path(skill_directory).resolve()
+            sandbox.set_skill_directories((skill_path,))
+
+            for name in ("ReadFile", "Glob", "Grep"):
+                self.assertIsNone(
+                    sandbox(ToolCall(name, name, {"path": str(skill_path / "file")}))
+                )
+            for name in ("WriteFile", "EditFile"):
+                self.assertIn(
+                    "outside the allowed directories",
+                    sandbox(ToolCall(name, name, {"path": str(skill_path / "file")}))
+                    or "",
+                )
+
     def test_rejects_paths_outside_allowed_directories(self) -> None:
         with (
             tempfile.TemporaryDirectory() as parent,

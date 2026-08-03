@@ -35,6 +35,11 @@ class MainTest(unittest.TestCase):
         )
         memory_home_patch.start()
         self.addCleanup(memory_home_patch.stop)
+        skill_home_patch = patch(
+            "duckduckcode.core.skill.Path.home", return_value=Path(self.home.name)
+        )
+        skill_home_patch.start()
+        self.addCleanup(skill_home_patch.stop)
         worker_patch = patch("duckduckcode.memory.long_term.MemoryManager.spawn_worker")
         self.worker = worker_patch.start()
         self.addCleanup(worker_patch.stop)
@@ -56,6 +61,7 @@ class MainTest(unittest.TestCase):
                     "Grep",
                     "Bash",
                     "ExitPlanMode",
+                    "LoadSkill",
                 ],
             )
             self.assertIsNotNone(agent.session_manager)
@@ -65,6 +71,28 @@ class MainTest(unittest.TestCase):
             self.assertEqual(
                 agent.plan_file,
                 workspace.resolve() / ".duckduckcode" / "plan.md",
+            )
+
+    def test_fork_factory_builds_an_isolated_non_recursive_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with patch(
+                "duckduckcode.main.OpenAIClient", side_effect=lambda **_: object()
+            ):
+                parent = build_agent(Config("test-key"), workspace)
+                child = parent._fork_agent_factory()
+            self.addCleanup(parent.close)
+            self.addCleanup(child.close)
+
+            self.assertIsNot(parent.client, child.client)
+            self.assertIsNone(child.session_manager)
+            self.assertIsNone(child.memory_manager)
+            self.assertIsNone(child.skill_manager)
+            self.assertNotIn(
+                "ExitPlanMode", [schema["name"] for schema in child.tools.schemas()]
+            )
+            self.assertNotIn(
+                "LoadSkill", [schema["name"] for schema in child.tools.schemas()]
             )
 
     def test_build_agent_injects_workspace_into_system_prompt(self) -> None:

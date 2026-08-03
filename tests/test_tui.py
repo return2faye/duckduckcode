@@ -471,6 +471,7 @@ class TuiTest(unittest.TestCase):
                     "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode\n"
                     "/sessions  List saved sessions\n"
+                    "/skills  Choose Skills for the next prompt\n"
                     "/status  Show context window usage",
                 ),
             ),
@@ -518,6 +519,7 @@ class TuiTest(unittest.TestCase):
             suggestions("/s"),
             [
                 ("/sessions", "List saved sessions"),
+                ("/skills", "Choose Skills for the next prompt"),
                 ("/status", "Show context window usage"),
             ],
         )
@@ -787,11 +789,32 @@ class TuiTest(unittest.TestCase):
                     "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode\n"
                     "/sessions  List saved sessions\n"
+                    "/skills  Choose Skills for the next prompt\n"
                     "/status  Show context window usage",
                 )
             ],
         )
         self.assertIsNone(tui._events)
+
+    def test_skill_menu_escape_restores_previous_selection(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        tui._skill_options = [
+            {"name": "one", "description": "One"},
+            {"name": "two", "description": "Two"},
+        ]
+        tui._selected_skills = {"one"}
+        tui._skill_menu_original = {"one"}
+        tui._skill_menu_open = True
+
+        tui._handle_skill_key(" ")
+        tui._handle_skill_key(curses.KEY_DOWN)
+        tui._handle_skill_key(" ")
+        self.assertEqual(tui._selected_skills, {"two"})
+
+        tui._handle_skill_key("\x1b")
+
+        self.assertEqual(tui._selected_skills, {"one"})
+        self.assertFalse(tui._skill_menu_open)
 
     def test_plan_review_requires_an_explicit_approve_selection(self) -> None:
         class FakeBackend:

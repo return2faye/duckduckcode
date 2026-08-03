@@ -481,6 +481,24 @@ class ContextManagerTest(unittest.TestCase):
             ],
         )
 
+    def test_context_never_splits_a_tool_call_from_its_result(self) -> None:
+        context = ContextManager(system_prompt="system")
+        context.add_user("complete old request " + "x" * 100_000)
+        context.add_assistant("complete old answer")
+        context.add_user("interrupted request")
+        context.add_tool_call(ToolCall("call_1", "ReadFile", {"path": "a.py"}))
+        context.add_user("later request")
+        context.add_tool_result("call_1", "contents")
+
+        transcript, cutoff = context.compaction_input() or ("", 0)
+
+        self.assertEqual(cutoff, 2)
+        self.assertNotIn("call_1", transcript)
+        self.assertEqual(
+            [message.tool_call_id for message in context.messages()[cutoff:]],
+            [None, "call_1", None, "call_1"],
+        )
+
     def test_context_uses_167k_default_auto_compaction_threshold(self) -> None:
         context = ContextManager(system_prompt="system")
 

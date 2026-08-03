@@ -286,18 +286,27 @@ class ContextManager:
         del self._messages[:cutoff]
 
     def _compaction_cutoff(self) -> int:
-        turn_starts = [
-            index
-            for index, message in enumerate(self._messages)
-            if message.kind == "message" and message.role == "user"
-        ]
-        if not turn_starts:
+        complete_turn_starts = []
+        tool_calls: set[str | None] = set()
+        tool_results: set[str | None] = set()
+        for index, message in enumerate(self._messages):
+            if (
+                message.kind == "message"
+                and message.role == "user"
+                and tool_calls == tool_results
+            ):
+                complete_turn_starts.append(index)
+            elif message.kind == "tool_call":
+                tool_calls.add(message.tool_call_id)
+            elif message.kind == "tool_result":
+                tool_results.add(message.tool_call_id)
+        if not complete_turn_starts:
             return 0
-        cutoff = turn_starts[-1]
+        cutoff = complete_turn_starts[-1]
         retained = _estimate_tokens(
             [_message_record(message) for message in self._messages[cutoff:]]
         )
-        for start in reversed(turn_starts[:-1]):
+        for start in reversed(complete_turn_starts[:-1]):
             turn_size = _estimate_tokens(
                 [_message_record(message) for message in self._messages[start:cutoff]]
             )

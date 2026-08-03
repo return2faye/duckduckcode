@@ -669,6 +669,45 @@ class TuiTest(unittest.TestCase):
         self.assertIsNone(tui._session_options)
         start.assert_called_once_with(backend.resume_session, "older")
 
+    def test_delete_session_menu_marks_current_and_requires_confirmation(self) -> None:
+        backend = Mock()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui._session_action = "delete"
+        tui._session_options = (
+            {
+                "id": "current",
+                "last_activity": 2,
+                "status": "valid",
+                "active": True,
+            },
+            {
+                "id": "broken",
+                "last_activity": 1,
+                "status": "invalid",
+                "active": False,
+            },
+        )
+
+        with patch.object(tui, "_start_operation") as start:
+            tui._handle_session_key("\n")
+            start.assert_not_called()
+            tui._handle_session_key("\n")
+
+        self.assertIsNone(tui._session_options)
+        start.assert_called_once_with(backend.delete_session, "current")
+
+    def test_delete_session_command_opens_session_menu(self) -> None:
+        backend = Mock()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.input = "/delete-session"
+        tui.cursor_index = len(tui.input)
+
+        with patch.object(tui, "_start_operation") as start:
+            tui._send()
+
+        self.assertEqual(tui._session_action, "delete")
+        start.assert_called_once_with(backend.sessions)
+
     def test_session_menu_draws_selected_options_and_closes_with_escape(self) -> None:
         class FakeScreen:
             def __init__(self) -> None:
@@ -700,12 +739,12 @@ class TuiTest(unittest.TestCase):
             tui._draw_session_panel(3, 80, 0)
 
         rendered = [args[2] for args in screen.strings]
-        self.assertIn("? Select session (10) · Enter select · Esc close", rendered)
-        self.assertEqual(len(rendered), 9)
-        self.assertTrue(
-            any("! session-8" in line and "invalid" in line for line in rendered)
+        self.assertIn(
+            "? Select session to resume (10) · Enter select · Esc close", rendered
         )
-        self.assertTrue(rendered[-1].startswith("› * session-9"))
+        self.assertEqual(len(rendered), 9)
+        self.assertTrue(any("[invalid] session-8" in line for line in rendered))
+        self.assertTrue(rendered[-1].startswith("› [current] session-9"))
         tui._handle_session_key("\x1b")
         self.assertIsNone(tui._session_options)
 

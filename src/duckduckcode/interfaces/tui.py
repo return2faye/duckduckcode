@@ -261,6 +261,7 @@ class _Tui:
         self.permission_mode = permission_mode
         self._session_options: tuple[dict[str, Any], ...] | None = None
         self._session_selection = 0
+        self._session_action = "resume"
         self._skill_options: list[dict[str, Any]] = []
         self._skill_menu_open = False
         self._skill_selection = 0
@@ -471,6 +472,10 @@ class _Tui:
                     self.messages.append(
                         ("error", "Session switching is unavailable in Plan Mode.")
                     )
+                elif slash_command[0] == "delete_session" and not slash_command[1]:
+                    self._session_action = "delete"
+                    self._delete_confirmation = None
+                    self._start_operation(self.backend.sessions)
                 elif slash_command[0] == "delete_session" and (
                     self._delete_confirmation != slash_command[1]
                 ):
@@ -485,6 +490,8 @@ class _Tui:
                     )
                 else:
                     self._delete_confirmation = None
+                    if slash_command[0] == "sessions":
+                        self._session_action = "resume"
                     method = getattr(self.backend, slash_command[0])
                     arguments = (slash_command[1],) if slash_command[1] else ()
                     self._start_operation(method, *arguments)
@@ -596,19 +603,19 @@ class _Tui:
                     self.messages.pop()
                     self._waiting = False
                 self._session_options = event.sessions
-                valid_indexes = [
+                selectable_indexes = [
                     index
                     for index, info in enumerate(self._session_options)
-                    if info.get("status") == "valid"
+                    if self._session_action == "delete" or info.get("status") == "valid"
                 ]
-                if valid_indexes:
+                if selectable_indexes:
                     self._session_selection = next(
                         (
                             index
                             for index, info in enumerate(self._session_options)
                             if info.get("active") and info.get("status") == "valid"
                         ),
-                        valid_indexes[0],
+                        selectable_indexes[0],
                     )
                 else:
                     self._session_options = None
@@ -835,19 +842,31 @@ class _Tui:
         if not options:
             return
         if key == curses.KEY_UP:
+            self._delete_confirmation = None
             self._move_session_selection(-1)
             return
         if key == curses.KEY_DOWN:
+            self._delete_confirmation = None
             self._move_session_selection(1)
             return
         if key in {3, 27, "\x03", "\x1b"}:
             self._session_options = None
+            self._delete_confirmation = None
             return
         if key not in {10, 13, "\n", "\r"} or self._events is not None:
             return
         session_id = str(options[self._session_selection]["id"])
+        if self._session_action == "delete" and self._delete_confirmation != session_id:
+            self._delete_confirmation = session_id
+            return
         self._session_options = None
-        self._start_operation(self.backend.resume_session, session_id)
+        self._delete_confirmation = None
+        method = (
+            self.backend.delete_session
+            if self._session_action == "delete"
+            else self.backend.resume_session
+        )
+        self._start_operation(method, session_id)
 
     def _handle_skill_key(self, key: object) -> None:
         if key == curses.KEY_UP:
@@ -885,7 +904,11 @@ class _Tui:
             self._session_selection = (self._session_selection + delta) % len(
                 self._session_options
             )
-            if self._session_options[self._session_selection].get("status") == "valid":
+            if (
+                self._session_action == "delete"
+                or self._session_options[self._session_selection].get("status")
+                == "valid"
+            ):
                 return
 
     def _handle_slash_key(self, key: object) -> bool:
@@ -1468,7 +1491,14 @@ class _Tui:
             top,
             0,
             _clip(
-                f"? Select session ({len(options)}) · Enter select · Esc close",
+                (
+                    f"? Select session to {self._session_action} ({len(options)}) · "
+                    + (
+                        "Enter again to confirm · Esc close"
+                        if self._delete_confirmation
+                        else "Enter select · Esc close"
+                    )
+                ),
                 width,
             ),
             _color(DUCK_COLOR) | curses.A_BOLD,
@@ -1482,7 +1512,9 @@ class _Tui:
                 .strftime("%Y-%m-%d %H:%M:%S")
             )
             valid = info.get("status") == "valid"
-            marker = "*" if info.get("active") else "!" if not valid else " "
+            marker = ("[current] " if info.get("active") else "") + (
+                "[invalid] " if not valid else ""
+            )
             attributes = _color(TEXT_COLOR if valid else MUTED_COLOR) | (
                 curses.A_REVERSE if selected else 0
             )
@@ -1490,8 +1522,7 @@ class _Tui:
                 top + row,
                 2,
                 _clip(
-                    f"{'›' if selected else ' '} {marker} {info.get('id')}  "
-                    f"{timestamp}{'' if valid else '  invalid'}",
+                    f"{'›' if selected else ' '} {marker}{info.get('id')}  {timestamp}",
                     max(1, width - 2),
                 ),
                 attributes,

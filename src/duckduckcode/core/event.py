@@ -84,6 +84,14 @@ class UsageEvent:
 
 
 @dataclass(frozen=True)
+class SubagentEvent:
+    task_id: str
+    name: str
+    status: Literal["started", "backgrounded", "completed", "failed", "timed_out"]
+    background: bool = False
+
+
+@dataclass(frozen=True)
 class ContextCompactionEvent:
     status: Literal["started", "completed", "skipped"]
     automatic: bool
@@ -129,6 +137,7 @@ AgentEvent = (
     | TurnCompleteEvent
     | LoopCompleteEvent
     | UsageEvent
+    | SubagentEvent
     | ContextCompactionEvent
     | ContextStatusEvent
     | SessionStateEvent

@@ -43,6 +43,7 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `config.py`: startup configuration loaded from environment variables
 - `core/context.py`: `Message`, system prompt, abstraction, tool schemas, and `ContextManager`
 - `core/event.py`: internal streaming and session lifecycle events
+- `core/subagent.py`: subagent Definition discovery and worker lifecycle
 - `eval/`: benchmark loading, isolated execution, local result storage, and judging
 - `memory/instruction.py`: project and user instruction loading
 - `memory/long_term.py`: validated user/project long-term memory storage and injection
@@ -151,6 +152,78 @@ passes `enable_skills=False`, so evaluations do not read user or project Skill
 paths.
 
 The default model is `o4-mini`, a reasoning model. Reasoning effort defaults to `low`; CLI selection can be added later.
+
+## Subagents
+
+The model can call one strict `Agent` tool to run a non-interactive subagent. All
+seven fields are required; nullable values use JSON `null`:
+
+```json
+{
+  "prompt": "Inspect the session persistence flow",
+  "description": "Trace sessions",
+  "subagent_type": "explore",
+  "model": null,
+  "run_in_background": true,
+  "name": null,
+  "isolation": true
+}
+```
+
+`subagent_type` selects a Definition. `null` creates a fork that inherits the
+parent abstraction, memory, completed conversation, model (unless overridden),
+permission mode, and persistent permission rules. Forks always run in the
+background. Definition subagents receive project startup instructions, their
+Definition body, and the assigned prompt, but no parent conversation. They are
+limited to `ReadFile`, `Glob`, and `Grep`, minus any tools listed by the
+Definition. Subagents cannot load Skills, enter Plan Mode, recurse through
+`Agent`, persist sessions or memory, or ask the user for permission; an action
+that would require confirmation is denied.
+
+Definitions are Markdown files discovered before each user turn in increasing
+priority order:
+
+1. packaged `explore` and `plan` Definitions
+2. `~/.duckduckcode/agents/*.md`
+3. `<workspace>/.duckduckcode/agents/*.md`
+
+Project entries override user and packaged entries with the same `type`.
+Duplicates inside one scope are skipped and reported. Files must be regular
+UTF-8 Markdown, no larger than 256KiB, with unique YAML fields and a non-empty
+body:
+
+```markdown
+---
+type: explore
+whenToUse: Use for focused repository exploration and evidence gathering.
+disallowedTools: []
+maxTurns: 20
+---
+
+Role, responsibilities, and output constraints go here.
+```
+
+`type` is lowercase kebab-case, `whenToUse` is non-empty, `maxTurns` is 1–50,
+and `disallowedTools` may name only registered tools. Refreshing Definitions
+updates the enum on the existing `Agent` schema; it never creates per-Definition
+tools.
+
+At most four workers run at once, each with a 600-second deadline. A foreground
+Definition task streams its tool and usage events but not its answer text; press
+Ctrl+B to leave that worker running in the background. Ctrl+B is ignored when no
+foreground subagent is active. Background completion or failure is delivered as
+untrusted hidden task data before the next model request in the session that
+created it. Switching sessions does not cancel work or leak results; deleting a
+session terminates its workers. Tasks are process-local and are not restored
+after restart.
+
+With `isolation=true`, the worker runs in a temporary workspace snapshot. `.git`
+and runtime session, memory, plan, and report data are excluded; edits never copy
+back, and the snapshot is removed after completion, failure, timeout, or
+shutdown. A non-isolated fork may edit the shared workspace. The first release
+therefore permits only one such fork at a time: it holds a whole-task write lease
+that temporarily makes parent `WriteFile`, `EditFile`, and `Bash` calls return
+busy. Read-only Definition tasks and isolated forks can still run concurrently.
 
 `OpenAIClient.stream()` uses Responses API SSE streaming and yields internal stream events. The parser currently handles text deltas, function tool calls, errors, and completion.
 

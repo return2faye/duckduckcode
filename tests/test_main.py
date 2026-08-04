@@ -8,15 +8,18 @@ import unittest
 from unittest.mock import Mock, patch
 
 from duckduckcode.config import Config
+from duckduckcode.core.context import Message
 from duckduckcode.core.event import (
     ConversationEvent,
     DoneEvent,
     ErrorEvent,
     ToolCallEvent,
     ToolResultEvent,
+    LoopCompleteEvent,
+    UsageEvent,
 )
-from duckduckcode.main import build_agent, main
-from duckduckcode.tools.tool import ToolCall
+from duckduckcode.main import build_agent, main, run_subagent_worker
+from duckduckcode.tools.tool import QuerySource, ToolCall
 
 
 class MainTest(unittest.TestCase):
@@ -62,6 +65,7 @@ class MainTest(unittest.TestCase):
                     "Bash",
                     "ExitPlanMode",
                     "LoadSkill",
+                    "Agent",
                 ],
             )
             self.assertIsNotNone(agent.session_manager)
@@ -71,6 +75,95 @@ class MainTest(unittest.TestCase):
             self.assertEqual(
                 agent.plan_file,
                 workspace.resolve() / ".duckduckcode" / "plan.md",
+            )
+
+    def test_subagent_worker_filters_definition_tools_and_emits_jsonl(self) -> None:
+        calls = []
+
+        class Context:
+            system_prompt = "project startup"
+            long_term_memory = ""
+
+            def messages(self):
+                return [Message("assistant", "worker answer")]
+
+        class WorkerAgent:
+            def __init__(self):
+                self.context = Context()
+
+            def set_permission_mode(self, mode):
+                calls.append(("permission", mode))
+
+            def stream(self, prompt):
+                calls.append(("prompt", prompt))
+                yield UsageEvent(3)
+                yield LoopCompleteEvent("completed", 1)
+
+            def close(self):
+                calls.append(("closed", True))
+
+        request = {
+            "prompt": "inspect",
+            "model": None,
+            "mode": "definition",
+            "definition": {
+                "type": "explore",
+                "body": "Read carefully.",
+                "max_turns": 6,
+                "disallowed_tools": ["Grep"],
+            },
+            "workspace": "/tmp",
+            "permission_mode": "ask_for_approval",
+            "isolation": True,
+            "boilerplate": "No questions.",
+        }
+        output = io.StringIO()
+        with patch(
+            "duckduckcode.main.build_agent", return_value=WorkerAgent()
+        ) as build:
+            with patch(
+                "duckduckcode.main.sys.stdin", io.StringIO(json.dumps(request) + "\n")
+            ):
+                with patch("duckduckcode.main.sys.stdout", output):
+                    run_subagent_worker(Config("test-key"))
+
+        self.assertEqual(build.call_args.kwargs["allowed_tools"], {"ReadFile", "Glob"})
+        self.assertEqual(build.call_args.kwargs["max_iterations"], 6)
+        self.assertEqual(build.call_args.kwargs["query_source"], QuerySource.SUBAGENT)
+        self.assertFalse(build.call_args.kwargs["enable_sessions"])
+        self.assertIn(("permission", "ask_for_approval"), calls)
+        self.assertIn(("prompt", "inspect"), calls)
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(events[0], {"type": "usage", "total_tokens": 3})
+        self.assertEqual(events[-1]["status"], "completed")
+        self.assertEqual(events[-1]["result"], "worker answer")
+
+    def test_filtered_worker_accepts_permission_rules_for_unregistered_tools(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            permissions = Path(self.home.name) / ".duckduckcode" / "permissions.yaml"
+            permissions.parent.mkdir(parents=True, exist_ok=True)
+            permissions.write_text("Bash: []\n", encoding="utf-8")
+
+            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+                agent = build_agent(
+                    Config("test-key"),
+                    workspace,
+                    enable_sessions=False,
+                    enable_memory=False,
+                    enable_skills=False,
+                    enable_exit_plan_mode=False,
+                    enable_subagents=False,
+                    allowed_tools={"ReadFile", "Glob"},
+                    query_source=QuerySource.SUBAGENT,
+                )
+            self.addCleanup(agent.close)
+
+            self.assertEqual(
+                [schema["name"] for schema in agent.tools.schemas()],
+                ["ReadFile", "Glob"],
             )
 
     def test_fork_factory_builds_an_isolated_non_recursive_agent(self) -> None:

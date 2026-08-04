@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import signal
 import unittest
 
 from duckduckcode.core.event import (
@@ -16,12 +17,47 @@ from duckduckcode.core.event import (
     ToolResultEvent,
     TurnCompleteEvent,
     UsageEvent,
+    SubagentEvent,
 )
 from duckduckcode.interfaces.backend import run_backend
 from duckduckcode.tools.tool import ToolCall
 
 
 class BackendTest(unittest.TestCase):
+    def test_backend_serializes_subagent_status_and_detach_signal(self) -> None:
+        class FakeAgent:
+            def __init__(self):
+                self.detached = 0
+
+            def detach_subagent(self):
+                self.detached += 1
+                return True
+
+            def stream(self, message):
+                signal.raise_signal(signal.SIGUSR1)
+                yield SubagentEvent("task", "explore", "backgrounded", True)
+                yield LoopCompleteEvent("completed", 1)
+
+        agent = FakeAgent()
+        output = io.StringIO()
+        run_backend(
+            agent,
+            input_stream=io.StringIO('{"message":"detach"}\n'),
+            output_stream=output,
+        )
+
+        self.assertEqual(agent.detached, 1)
+        self.assertEqual(
+            json.loads(output.getvalue().splitlines()[0]),
+            {
+                "type": "subagent",
+                "task_id": "task",
+                "name": "explore",
+                "status": "backgrounded",
+                "background": True,
+            },
+        )
+
     def test_backend_reports_context_status(self) -> None:
         class FakeAgent:
             def context_status(self):

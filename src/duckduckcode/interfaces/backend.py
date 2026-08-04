@@ -19,6 +19,7 @@ from ..core.event import (
     SessionListEvent,
     SessionStateEvent,
     SkillListEvent,
+    SubagentEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -38,6 +39,10 @@ def run_backend(
             raise KeyboardInterrupt
 
     previous_handler = signal.signal(signal.SIGINT, interrupt_active_stream)
+    previous_detach_handler = signal.signal(
+        signal.SIGUSR1,
+        lambda _signum, _frame: agent.detach_subagent() if active else None,
+    )
     try:
         for line in input_stream:
             try:
@@ -108,6 +113,7 @@ def run_backend(
                 active = False
     finally:
         signal.signal(signal.SIGINT, previous_handler)
+        signal.signal(signal.SIGUSR1, previous_detach_handler)
 
 
 def _run_stream(
@@ -235,6 +241,14 @@ def _event_to_json(event: object) -> dict[str, object]:
         }
     if isinstance(event, UsageEvent):
         return {"type": "usage", "total_tokens": event.total_tokens}
+    if isinstance(event, SubagentEvent):
+        return {
+            "type": "subagent",
+            "task_id": event.task_id,
+            "name": event.name,
+            "status": event.status,
+            "background": event.background,
+        }
     if isinstance(event, ContextCompactionEvent):
         return {
             "type": "context_compaction",

@@ -29,6 +29,7 @@ EXPECTED_MODULES = {
     "core/context.py",
     "core/event.py",
     "core/skill.py",
+    "core/subagent.py",
     "interfaces/__init__.py",
     "interfaces/backend.py",
     "interfaces/tui.py",

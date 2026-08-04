@@ -29,6 +29,7 @@ from ..core.event import (
     SessionListEvent,
     SessionStateEvent,
     SkillListEvent,
+    SubagentEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -195,6 +196,9 @@ class PipeBackend:
         # ponytail: SIGINT is enough for POSIX; use a pipe command if Windows matters.
         self.process.send_signal(signal.SIGINT)
 
+    def detach_subagent(self) -> None:
+        self.process.send_signal(signal.SIGUSR1)
+
 
 def run_tui(
     model: str,
@@ -321,6 +325,10 @@ class _Tui:
                     self._handle_skill_key(key)
                     continue
                 if self._handle_slash_key(key):
+                    continue
+                if key in {2, "\x02"}:
+                    if self._events is not None:
+                        self.backend.detach_subagent()
                     continue
                 if key in {3, "\x03"}:
                     if self._copy_selection():
@@ -638,6 +646,17 @@ class _Tui:
                     self.messages.append(("duckduckcode", "No Skills found."))
             elif isinstance(event, UsageEvent):
                 self.tokens += event.total_tokens
+            elif isinstance(event, SubagentEvent):
+                if self._waiting:
+                    self.messages.pop()
+                    self._waiting = False
+                self.messages.append(
+                    (
+                        "duckduckcode",
+                        f"Subagent {event.name} [{event.task_id[:8]}]: "
+                        f"{event.status.replace('_', ' ')}.",
+                    )
+                )
             elif isinstance(event, ContextCompactionEvent):
                 if event.status == "started":
                     self._compaction_active = True
@@ -1768,6 +1787,13 @@ def _event_from_json(data: dict[str, Any]) -> AgentEvent:
         )
     if event_type == "usage":
         return UsageEvent(int(data.get("total_tokens", 0)))
+    if event_type == "subagent":
+        return SubagentEvent(
+            str(data.get("task_id", "")),
+            str(data.get("name", "")),
+            data.get("status", "failed"),
+            bool(data.get("background", False)),
+        )
     if event_type == "context_compaction":
         return ContextCompactionEvent(
             data.get("status", "skipped"),

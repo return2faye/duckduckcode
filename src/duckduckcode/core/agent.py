@@ -27,6 +27,7 @@ from .event import (
     SessionListEvent,
     SessionStateEvent,
     SkillListEvent,
+    SubagentEvent,
     ToolCallEvent,
     ToolResultEvent,
     TurnCompleteEvent,
@@ -34,8 +35,15 @@ from .event import (
 )
 from .prompts import COMPACTION_SYSTEM_PROMPT
 from .skill import SkillManager
+from .subagent import DefinitionManager, SubagentManager
 from ..permissions import PermissionChecker, PermissionMode
-from ..tools.tool import ToolCall, ToolManager, ToolResult
+from ..tools.tool import (
+    QuerySource,
+    ToolCall,
+    ToolManager,
+    ToolResult,
+    create_agent_tool,
+)
 
 AgentResponse = PermissionChoice | PlanReviewResponse | None
 COMPACTION_MAX_ATTEMPTS = 3
@@ -56,6 +64,9 @@ class Agent:
         skill_manager: SkillManager | None = None,
         skill_root_callback: Any | None = None,
         fork_agent_factory: Callable[[], Agent] | None = None,
+        definition_manager: DefinitionManager | None = None,
+        subagent_manager: SubagentManager | None = None,
+        query_source: QuerySource = QuerySource.USER,
     ) -> None:
         if (
             isinstance(max_iterations, bool)
@@ -74,6 +85,10 @@ class Agent:
         self.skill_manager = skill_manager
         self._skill_root_callback = skill_root_callback
         self._fork_agent_factory = fork_agent_factory
+        self.definition_manager = definition_manager
+        self.subagent_manager = subagent_manager
+        self.query_source = query_source
+        self._runtime_conversation_key = uuid4().hex
         self._skill_list_snapshot: tuple[dict[str, Any], ...] | None = None
         self._session_snapshot = (
             session_manager.start() if session_manager is not None else None
@@ -105,6 +120,7 @@ class Agent:
         if self._session_snapshot is not None:
             yield _session_state("initialized", self._session_snapshot)
         yield from self._refresh_skills(force=True)
+        yield from self._refresh_definitions()
         yield from self._startup_compaction()
         yield LoopCompleteEvent("completed", 0)
 
@@ -146,6 +162,9 @@ class Agent:
         self, session_id: str | None = None
     ) -> Generator[AgentEvent, None, None]:
         self._ensure_session_switch_allowed()
+        if self.subagent_manager is not None:
+            target = session_id or self._session_key()
+            self.subagent_manager.terminate_session(target)
         snapshot = self._require_sessions().delete(session_id)
         self._session_snapshot = snapshot
         self._startup_checked = False
@@ -191,6 +210,8 @@ class Agent:
             if warning:
                 yield ErrorEvent(warning, "memory")
         yield from self._refresh_skills()
+        yield from self._refresh_definitions()
+        yield from self._drain_subagents()
         try:
             self._add_user(user_message)
         except Exception as exc:
@@ -246,6 +267,7 @@ class Agent:
         context_length_recoveries = 0
 
         for iteration in range(1, self.max_iterations + 1):
+            yield from self._drain_subagents()
             if self.context.should_compact():
                 yield from self._compact(automatic=True)
             if self.context.estimated_tokens() >= self.context.context_window_tokens:
@@ -608,6 +630,22 @@ class Agent:
                 continue
             get_tool = getattr(self.tools, "get", None)
             tool = get_tool(tool_call.name) if callable(get_tool) else None
+            if (
+                self.subagent_manager is not None
+                and self.subagent_manager.workspace_busy
+                and tool_call.name in {"WriteFile", "EditFile", "Bash"}
+            ):
+                completed.append(
+                    (
+                        tool_call,
+                        ToolResult(
+                            "The shared workspace is busy while a non-isolated fork "
+                            "holds the write lease.",
+                            True,
+                        ),
+                    )
+                )
+                continue
             if self.context.mode == "plan" and tool is not None:
                 decision = self.permission_checker.check(
                     tool_call,
@@ -620,6 +658,17 @@ class Agent:
                 allowed.append(tool_call)
                 continue
             if decision.action == "ask":
+                if self.query_source == QuerySource.SUBAGENT:
+                    completed.append(
+                        (
+                            tool_call,
+                            ToolResult(
+                                "Permission denied: subagents cannot request user approval.",
+                                True,
+                            ),
+                        )
+                    )
+                    continue
                 choice = yield PermissionRequestEvent(
                     tool_call.call_id,
                     tool_call.name,
@@ -660,9 +709,12 @@ class Agent:
             )
             completed.append((tool_call, result))
             self._sync_active_skills()
+        agent_calls = [call for call in allowed if call.name == "Agent"]
+        for tool_call in agent_calls:
+            completed.append((tool_call, (yield from self._run_subagent(tool_call))))
         completed.extend(
             self.tools.execute_many(
-                [call for call in allowed if call.name != "LoadSkill"]
+                [call for call in allowed if call.name not in {"LoadSkill", "Agent"}]
             )
         )
         self._sync_active_skills()
@@ -692,6 +744,67 @@ class Agent:
             yield SkillListEvent(snapshot)
         if warning:
             yield ErrorEvent(warning, "skill")
+
+    def _refresh_definitions(self) -> Generator[AgentEvent, None, None]:
+        if self.definition_manager is None:
+            return
+        definitions, warning = self.definition_manager.refresh()
+        current = self.tools.get("Agent")
+        handler = current.handler if current is not None else lambda **_: ""
+        self.tools.register(
+            create_agent_tool(
+                {definition.type: definition.when_to_use for definition in definitions},
+                handler,
+            )
+        )
+        self.context.set_tool_schemas(self.tools.schemas())
+        if warning:
+            yield ErrorEvent(warning, "subagent_definition")
+
+    def _run_subagent(
+        self, tool_call: ToolCall
+    ) -> Generator[AgentEvent, AgentResponse, ToolResult]:
+        if self.query_source == QuerySource.SUBAGENT:
+            return ToolResult("Subagents cannot invoke the Agent tool.", True)
+        if self.subagent_manager is None:
+            return ToolResult("Subagents are unavailable in this Agent.", True)
+        tool = self.tools.get("Agent")
+        try:
+            arguments = tool.validator(dict(tool_call.arguments)) if tool else {}
+        except Exception as exc:
+            return ToolResult(str(exc), True)
+        return (
+            yield from self.subagent_manager.run(
+                tool_call.call_id,
+                arguments,
+                session_key=self._session_key(),
+                context=self.context,
+                permission_mode=self.permission_checker.permission_mode,
+            )
+        )
+
+    def _drain_subagents(self) -> Generator[AgentEvent, None, None]:
+        if self.subagent_manager is None:
+            return
+        events, messages = self.subagent_manager.drain(self._session_key())
+        for event in events:
+            yield event
+        for message in messages:
+            self._add_user(message, visible=False)
+
+    def detach_subagent(self) -> bool:
+        return (
+            self.subagent_manager.detach_foreground()
+            if self.subagent_manager is not None
+            else False
+        )
+
+    def _session_key(self) -> str:
+        if self.session_manager is not None:
+            session_id = self.session_manager.current_session_id
+            if session_id is not None:
+                return session_id
+        return self._runtime_conversation_key
 
     def _run_fork_skill(
         self, tool_call: ToolCall
@@ -943,14 +1056,18 @@ class Agent:
 
     def close(self) -> None:
         try:
-            close = getattr(self.client, "close", None)
-            if callable(close):
-                close()
+            if self.subagent_manager is not None:
+                self.subagent_manager.close()
         finally:
             try:
-                self.context.close()
+                close = getattr(self.client, "close", None)
+                if callable(close):
+                    close()
             finally:
-                self.permission_checker.close()
+                try:
+                    self.context.close()
+                finally:
+                    self.permission_checker.close()
 
 
 def _extract_summary(output: str) -> str:

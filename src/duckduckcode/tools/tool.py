@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from enum import Enum
 from queue import Queue
 from typing import Any, Callable
 
 Validator = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+class QuerySource(str, Enum):
+    USER = "user"
+    SUBAGENT = "subagent"
 
 
 @dataclass(frozen=True)
@@ -125,9 +131,97 @@ def create_load_skill_tool(handler: Callable[..., Any]) -> Tool:
     )
 
 
+def create_agent_tool(
+    definition_types: list[str] | tuple[str, ...] | Mapping[str, str],
+    handler: Callable[..., Any],
+) -> Tool:
+    descriptions = (
+        dict(definition_types) if isinstance(definition_types, Mapping) else {}
+    )
+    types = list(dict.fromkeys(definition_types))
+    params = {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "Complete subtask."},
+            "description": {
+                "type": "string",
+                "description": "Short task description.",
+            },
+            "subagent_type": {
+                "type": ["string", "null"],
+                "enum": [*types, None],
+            },
+            "model": {"type": ["string", "null"]},
+            "run_in_background": {"type": "boolean"},
+            "name": {"type": ["string", "null"]},
+            "isolation": {"type": "boolean"},
+        },
+        "required": [
+            "prompt",
+            "description",
+            "subagent_type",
+            "model",
+            "run_in_background",
+            "name",
+            "isolation",
+        ],
+        "additionalProperties": False,
+    }
+
+    def validate(arguments: dict[str, Any]) -> dict[str, Any]:
+        expected = set(params["required"])
+        missing = sorted(expected - arguments.keys())
+        unsupported = sorted(arguments.keys() - expected)
+        if missing or unsupported:
+            detail = (
+                "missing: " + ", ".join(missing)
+                if missing
+                else "unsupported: " + ", ".join(unsupported)
+            )
+            raise ValueError(f"Agent failed: {detail}.")
+        for field in ("prompt", "description"):
+            if not isinstance(arguments[field], str) or not arguments[field].strip():
+                raise ValueError(f"Agent failed: '{field}' must be a non-empty string.")
+        for field in ("model", "name"):
+            value = arguments[field]
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(
+                    f"Agent failed: '{field}' must be null or a non-empty string."
+                )
+        subagent_type = arguments["subagent_type"]
+        if subagent_type is not None and subagent_type not in types:
+            raise ValueError(f"Agent failed: unknown subagent_type '{subagent_type}'.")
+        for field in ("run_in_background", "isolation"):
+            if not isinstance(arguments[field], bool):
+                raise ValueError(f"Agent failed: '{field}' must be a boolean.")
+        normalized = dict(arguments)
+        if subagent_type is None:
+            normalized["run_in_background"] = True
+        for field in ("prompt", "description", "model", "name"):
+            if normalized[field] is not None:
+                normalized[field] = normalized[field].strip()
+        return normalized
+
+    guidance = "".join(
+        f"\n- {name}: {descriptions[name]}" for name in types if name in descriptions
+    )
+    return create_tool(
+        "Agent",
+        "Run one non-interactive Definition-based subagent or fork this conversation. "
+        "Fork tasks always run in the background. Available Definition types:"
+        + guidance,
+        params,
+        handler,
+        validate,
+        is_read_only=True,
+        category="agent",
+    )
+
+
 class ToolManager:
-    def __init__(self) -> None:
+    def __init__(self, source: QuerySource = QuerySource.USER) -> None:
         self._tools: dict[str, Tool] = {}
+        self.source = source
 
     def register(
         self,
@@ -180,6 +274,8 @@ class ToolManager:
         return self._tools.get(name)
 
     def execute(self, tool_call: ToolCall) -> ToolResult:
+        if self.source == QuerySource.SUBAGENT and tool_call.name == "Agent":
+            return ToolResult("Subagents cannot invoke the Agent tool.", is_error=True)
         if tool_call.name not in self._tools:
             return ToolResult(f"Unknown tool: {tool_call.name}", is_error=True)
 

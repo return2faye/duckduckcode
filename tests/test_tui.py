@@ -23,6 +23,7 @@ from duckduckcode.core.event import (
     ToolResultEvent,
     TurnCompleteEvent,
     UsageEvent,
+    SubagentEvent,
 )
 from duckduckcode.interfaces import slash_command as slash_command_module
 from duckduckcode.interfaces import tui as tui_module
@@ -327,6 +328,34 @@ class TuiTest(unittest.TestCase):
         PipeBackend(process).cancel()
 
         self.assertEqual(process.signals, [signal.SIGINT])
+
+    def test_pipe_backend_detaches_foreground_subagent(self) -> None:
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.signals = []
+
+            def send_signal(self, value):
+                self.signals.append(value)
+
+        process = FakeProcess()
+
+        PipeBackend(process).detach_subagent()
+
+        self.assertEqual(process.signals, [signal.SIGUSR1])
+
+    def test_tui_parses_subagent_status(self) -> None:
+        self.assertEqual(
+            tui_module._event_from_json(
+                {
+                    "type": "subagent",
+                    "task_id": "task",
+                    "name": "explore",
+                    "status": "completed",
+                    "background": True,
+                }
+            ),
+            SubagentEvent("task", "explore", "completed", True),
+        )
 
     def test_read_stream_forwards_events_and_sentinel(self) -> None:
         class FakeBackend:

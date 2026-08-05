@@ -39,6 +39,10 @@ EXPECTED_MODULES = {
     "permissions/path_sandbox.py",
     "permissions/rule_policy.py",
     "providers/__init__.py",
+    "providers/deepseek/__init__.py",
+    "providers/deepseek/client.py",
+    "providers/deepseek/serialize.py",
+    "providers/deepseek/stream.py",
     "providers/openai/__init__.py",
     "providers/openai/client.py",
     "providers/openai/serialize.py",
@@ -83,7 +87,7 @@ ALLOWED_DEPENDENCIES = {
     "core": {"core", "permissions", "tools"},
     "interfaces": {"core", "interfaces"},
     "permissions": {"permissions", "tools"},
-    "providers": {"core", "providers", "tools"},
+    "providers": {"config", "core", "providers", "tools"},
     "tools": {"tools"},
 }
 

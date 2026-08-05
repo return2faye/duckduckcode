@@ -51,6 +51,18 @@ JUDGE_SCHEMA = {
     "required": ["score", "reason"],
     "additionalProperties": False,
 }
+JUDGE_PROMPT = (
+    "Grade this coding-agent run against the benchmark outputs. "
+    "Score 0-4: 0 no useful work, 1 major failure, 2 partial, "
+    "3 correct with only minor issues, 4 fully correct. Judge only "
+    "the supplied evidence and explain the decisive reason concisely. "
+    "For compaction cases, verify the captured summaries preserve "
+    "critical facts, newest instructions, and pending actions while "
+    "discarding irrelevant detail. Use the complete tool trace, "
+    "including call arguments, results, errors, and permission "
+    "decisions, to verify what the agent actually inspected and did. "
+    "Return one JSON object containing only score and reason."
+)
 
 
 @dataclass(frozen=True)
@@ -234,8 +246,8 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
     return {
         "batch_id": batch_id,
         "case_id": case.id,
-        "agent_model": config.openai_model,
-        "judge_model": config.openai_judge_model,
+        "agent_model": config.agent.model,
+        "judge_model": config.judge.model,
         "status": status,
         "score": score,
         "passed": passed,
@@ -429,7 +441,13 @@ def _tree_hash(root: Path) -> str:
 
 def _judge(config: Config, evidence: dict[str, Any]) -> JudgeResult:
     langsmith_client = None
-    client = OpenAI(api_key=config.openai_api_key)
+    if config.judge.provider == "deepseek":
+        client = OpenAI(
+            api_key=config.deepseek_api_key,
+            base_url=config.deepseek_base_url,
+        )
+    else:
+        client = OpenAI(api_key=config.openai_api_key)
     if config.langsmith_tracing:
         langsmith_client = LangSmithClient(api_key=config.langsmith_api_key)
         client = wrap_openai(
@@ -441,48 +459,57 @@ def _judge(config: Config, evidence: dict[str, Any]) -> JudgeResult:
             },
         )
     try:
-        response = client.responses.create(
-            model=config.openai_judge_model,
-            instructions=(
-                "Grade this coding-agent run against the benchmark outputs. "
-                "Score 0-4: 0 no useful work, 1 major failure, 2 partial, "
-                "3 correct with only minor issues, 4 fully correct. Judge only "
-                "the supplied evidence and explain the decisive reason concisely. "
-                "For compaction cases, verify the captured summaries preserve "
-                "critical facts, newest instructions, and pending actions while "
-                "discarding irrelevant detail. Use the complete tool trace, "
-                "including call arguments, results, errors, and permission "
-                "decisions, to verify what the agent actually inspected and did."
-            ),
-            input=json.dumps(evidence, ensure_ascii=False),
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "duckduckcode_evaluation",
-                    "schema": JUDGE_SCHEMA,
-                    "strict": True,
-                }
-            },
-        )
-        try:
-            result = json.loads(response.output_text)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise RuntimeError("Judge returned invalid JSON") from exc
-        if not isinstance(result, dict) or set(result) != {"score", "reason"}:
-            raise RuntimeError("Judge returned unexpected fields")
-        score, reason = result["score"], result["reason"]
-        if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 4:
-            raise RuntimeError("Judge score must be an integer from 0 to 4")
-        if not isinstance(reason, str) or not reason.strip():
-            raise RuntimeError("Judge reason must be a non-empty string")
+        if config.judge.provider == "deepseek":
+            response = client.chat.completions.create(
+                model=config.judge.model,
+                messages=[
+                    {"role": "system", "content": JUDGE_PROMPT},
+                    {
+                        "role": "user",
+                        "content": json.dumps(evidence, ensure_ascii=False),
+                    },
+                ],
+                response_format={"type": "json_object"},
+            )
+            output = response.choices[0].message.content
+        else:
+            response = client.responses.create(
+                model=config.judge.model,
+                instructions=JUDGE_PROMPT,
+                input=json.dumps(evidence, ensure_ascii=False),
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "duckduckcode_evaluation",
+                        "schema": JUDGE_SCHEMA,
+                        "strict": True,
+                    }
+                },
+            )
+            output = response.output_text
         usage = int(getattr(getattr(response, "usage", None), "total_tokens", 0) or 0)
-        return JudgeResult(score, reason.strip(), usage)
+        return _judge_result(output, usage)
     finally:
         try:
             client.close()
         finally:
             if langsmith_client is not None:
                 langsmith_client.flush()
+
+
+def _judge_result(output: str | None, usage: int) -> JudgeResult:
+    try:
+        result = json.loads(output)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise RuntimeError("Judge returned invalid JSON") from exc
+    if not isinstance(result, dict) or set(result) != {"score", "reason"}:
+        raise RuntimeError("Judge returned unexpected fields")
+    score, reason = result["score"], result["reason"]
+    if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 4:
+        raise RuntimeError("Judge score must be an integer from 0 to 4")
+    if not isinstance(reason, str) or not reason.strip():
+        raise RuntimeError("Judge reason must be a non-empty string")
+    return JudgeResult(score, reason.strip(), usage)
 
 
 def _initialize_database(connection: sqlite3.Connection) -> None:

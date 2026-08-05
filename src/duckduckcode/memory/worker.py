@@ -9,7 +9,7 @@ from typing import Any
 from ..config import Config
 from ..core.context import ContextManager, Message
 from ..core.event import ConversationEvent, DoneEvent, ErrorEvent, ToolCallEvent
-from ..providers.openai.client import OpenAIClient
+from ..providers import create_client
 from .long_term import MemoryError, MemoryManager
 from .session import SYNTHETIC_TOOL_ERROR, SessionManager
 
@@ -116,13 +116,7 @@ def main() -> None:
         records = read_session_slice(workspace, args.session, args.start, args.end)
         prompt = build_extraction_input(manager, records)
         config = Config.from_env()
-        client = OpenAIClient(
-            api_key=config.openai_api_key,
-            model=config.openai_model,
-            langsmith_tracing=config.langsmith_tracing,
-            langsmith_api_key=config.langsmith_api_key,
-            langsmith_project=config.langsmith_project,
-        )
+        client = create_client(config, config.memory)
         try:
             actions = request_actions(client, prompt, config.reasoning)
         finally:

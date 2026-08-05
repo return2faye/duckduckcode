@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from duckduckcode.config import Config
+from duckduckcode.config import Config, ModelConfig
 from duckduckcode.core.context import Message
 from duckduckcode.core.event import (
     ConversationEvent,
@@ -50,7 +50,7 @@ class MainTest(unittest.TestCase):
     def test_build_agent_registers_core_file_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+            with patch("duckduckcode.main.create_client", return_value=object()):
                 agent = build_agent(Config("test-key"), workspace)
             self.addCleanup(agent.close)
 
@@ -130,6 +130,8 @@ class MainTest(unittest.TestCase):
         self.assertEqual(build.call_args.kwargs["allowed_tools"], {"ReadFile", "Glob"})
         self.assertEqual(build.call_args.kwargs["max_iterations"], 6)
         self.assertEqual(build.call_args.kwargs["query_source"], QuerySource.SUBAGENT)
+        self.assertEqual(build.call_args.kwargs["model_role"], "subagent")
+        self.assertIsNone(build.call_args.kwargs["model_override"])
         self.assertFalse(build.call_args.kwargs["enable_sessions"])
         self.assertIn(("permission", "ask_for_approval"), calls)
         self.assertIn(("prompt", "inspect"), calls)
@@ -147,7 +149,7 @@ class MainTest(unittest.TestCase):
             permissions.parent.mkdir(parents=True, exist_ok=True)
             permissions.write_text("Bash: []\n", encoding="utf-8")
 
-            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+            with patch("duckduckcode.main.create_client", return_value=object()):
                 agent = build_agent(
                     Config("test-key"),
                     workspace,
@@ -170,7 +172,8 @@ class MainTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             with patch(
-                "duckduckcode.main.OpenAIClient", side_effect=lambda **_: object()
+                "duckduckcode.main.create_client",
+                side_effect=lambda *_args, **_kwargs: object(),
             ):
                 parent = build_agent(Config("test-key"), workspace)
                 child = parent._fork_agent_factory()
@@ -191,7 +194,7 @@ class MainTest(unittest.TestCase):
     def test_build_agent_injects_workspace_into_system_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+            with patch("duckduckcode.main.create_client", return_value=object()):
                 agent = build_agent(Config("test-key"), workspace)
             self.addCleanup(agent.close)
 
@@ -218,6 +221,23 @@ class MainTest(unittest.TestCase):
 
             self.assertFalse(temporary_directory.exists())
 
+    def test_build_agent_uses_the_configured_model_role(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            config = Config(
+                "openai-key",
+                deepseek_api_key="deepseek-key",
+                agent=ModelConfig("deepseek", "deepseek-model"),
+            )
+            with patch(
+                "duckduckcode.main.create_client", return_value=object()
+            ) as create:
+                agent = build_agent(config, workspace)
+            self.addCleanup(agent.close)
+
+            create.assert_called_once_with(config, config.agent, model=None)
+            self.assertIn("Model: deepseek-model", agent.context.system_prompt)
+
     def test_build_agent_loads_instruction_layers_and_static_tool_schemas(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -234,7 +254,7 @@ class MainTest(unittest.TestCase):
                 "LOCAL_LAYER_MARKER", encoding="utf-8"
             )
 
-            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+            with patch("duckduckcode.main.create_client", return_value=object()):
                 agent = build_agent(Config("test-key"), workspace)
             self.addCleanup(agent.close)
 
@@ -269,7 +289,7 @@ class MainTest(unittest.TestCase):
                 "fixture-specific", encoding="utf-8"
             )
 
-            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+            with patch("duckduckcode.main.create_client", return_value=object()):
                 agent = build_agent(
                     Config("test-key"),
                     workspace,
@@ -285,7 +305,7 @@ class MainTest(unittest.TestCase):
             workspace = Path(directory)
             with (
                 patch("duckduckcode.main.MemoryManager") as memory,
-                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+                patch("duckduckcode.main.create_client", return_value=object()),
             ):
                 agent = build_agent(
                     Config("test-key"),
@@ -305,7 +325,7 @@ class MainTest(unittest.TestCase):
             workspace.joinpath("DDCODE.md").write_text("x" * 6_000, encoding="utf-8")
 
             with (
-                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+                patch("duckduckcode.main.create_client", return_value=object()),
                 self.assertRaisesRegex(
                     RuntimeError,
                     r"estimated at \d+ tokens.*trigger of 5000 tokens",
@@ -324,7 +344,7 @@ class MainTest(unittest.TestCase):
             workspace = Path(directory)
             sandbox = Mock()
             with (
-                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+                patch("duckduckcode.main.create_client", return_value=object()),
                 patch("duckduckcode.main.OSSandbox", return_value=sandbox) as factory,
             ):
                 agent = build_agent(Config("test-key"), workspace)
@@ -341,7 +361,7 @@ class MainTest(unittest.TestCase):
             source = workspace / "source.txt"
             source.write_text("old", encoding="utf-8")
             with (
-                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+                patch("duckduckcode.main.create_client", return_value=object()),
                 patch("duckduckcode.main.OSSandbox", return_value=None),
             ):
                 agent = build_agent(Config("test-key"), workspace)
@@ -407,7 +427,7 @@ class MainTest(unittest.TestCase):
     def test_build_agent_allows_searching_private_temporary_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            with patch("duckduckcode.main.OpenAIClient", return_value=object()):
+            with patch("duckduckcode.main.create_client", return_value=object()):
                 agent = build_agent(Config("test-key"), workspace)
             self.addCleanup(agent.close)
             temporary_line = next(
@@ -465,7 +485,7 @@ class MainTest(unittest.TestCase):
             marker = workspace / "build" / "marker.txt"
             marker.parent.mkdir()
             marker.write_text("keep", encoding="utf-8")
-            with patch("duckduckcode.main.OpenAIClient", return_value=FakeClient()):
+            with patch("duckduckcode.main.create_client", return_value=FakeClient()):
                 agent = build_agent(Config("test-key"), workspace)
                 events = list(agent.stream("remove build"))
                 agent.close()
@@ -494,7 +514,7 @@ class MainTest(unittest.TestCase):
                 encoding="utf-8",
             )
             with (
-                patch("duckduckcode.main.OpenAIClient", return_value=object()),
+                patch("duckduckcode.main.create_client", return_value=object()),
                 patch(
                     "duckduckcode.permissions.rule_policy.Path.home",
                     return_value=Path(home),

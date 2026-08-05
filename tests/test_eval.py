@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from duckduckcode.config import Config
+from duckduckcode.config import Config, ModelConfig
 from duckduckcode import eval as eval_module
 from duckduckcode.eval import JudgeResult, load_benches, run_evaluations, sync_cases
 from duckduckcode.eval import runner as runner_module
@@ -404,6 +404,61 @@ class JudgeTest(unittest.TestCase):
         with patch.object(runner_module, "OpenAI", return_value=client):
             with self.assertRaisesRegex(RuntimeError, "0 to 4"):
                 runner_module._judge(Config("key"), {})
+
+    def test_deepseek_judge_uses_chat_json_output(self) -> None:
+        response = type(
+            "Response",
+            (),
+            {
+                "choices": [
+                    type(
+                        "Choice",
+                        (),
+                        {
+                            "message": type(
+                                "Message",
+                                (),
+                                {"content": '{"score": 4, "reason": "correct"}'},
+                            )()
+                        },
+                    )()
+                ],
+                "usage": type("Usage", (), {"total_tokens": 9})(),
+            },
+        )()
+        completions = type(
+            "Completions",
+            (),
+            {
+                "create": lambda self, **kwargs: setattr(self, "kwargs", kwargs)
+                or response
+            },
+        )()
+        client = type(
+            "Client",
+            (),
+            {
+                "chat": type("Chat", (), {"completions": completions})(),
+                "close": lambda self: setattr(self, "closed", True),
+            },
+        )()
+        config = Config(
+            "openai-key",
+            deepseek_api_key="deepseek-key",
+            deepseek_base_url="https://deepseek.example/v1",
+            judge=ModelConfig("deepseek", "deepseek-judge"),
+        )
+
+        with patch.object(runner_module, "OpenAI", return_value=client) as factory:
+            result = runner_module._judge(config, {"agent_completed": True})
+
+        self.assertEqual(result, JudgeResult(4, "correct", 9))
+        factory.assert_called_once_with(
+            api_key="deepseek-key", base_url="https://deepseek.example/v1"
+        )
+        self.assertEqual(completions.kwargs["model"], "deepseek-judge")
+        self.assertEqual(completions.kwargs["response_format"], {"type": "json_object"})
+        self.assertTrue(client.closed)
 
 
 class ReportTest(unittest.TestCase):

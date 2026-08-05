@@ -1,6 +1,6 @@
 # duckduckcode
 
-Minimal Python coding agent shell using the OpenAI API.
+Minimal Python coding agent shell using OpenAI or DeepSeek.
 
 ## Setup
 
@@ -9,17 +9,32 @@ uv sync
 cp .env.example .env
 ```
 
-Set `OPENAI_API_KEY` in `.env`.
+Configure each runtime role independently in `.env`:
 
-Defaults:
+```env
+AGENT_PROVIDER=openai
+AGENT_MODEL=o4-mini
+SUBAGENT_PROVIDER=openai
+SUBAGENT_MODEL=o4-mini
+MEMORY_PROVIDER=openai
+MEMORY_MODEL=o4-mini
+JUDGE_PROVIDER=openai
+JUDGE_MODEL=gpt-5.6-terra
+```
 
-- `OPENAI_MODEL=o4-mini`
+Provider values are `openai` or `deepseek`. Set `OPENAI_API_KEY` and/or
+`DEEPSEEK_API_KEY` for the providers selected by these roles. DeepSeek defaults
+to `deepseek-v4-pro` when a role model is omitted; override its endpoint with
+`DEEPSEEK_BASE_URL` if needed. Existing `OPENAI_MODEL` and
+`OPENAI_JUDGE_MODEL` values remain OpenAI-only compatibility fallbacks.
+
+Other defaults:
+
 - `OPENAI_REASONING_EFFORT=low`
 - `LANGSMITH_TRACING=false`
-- `OPENAI_JUDGE_MODEL=gpt-5.6-terra`
 
 Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` to trace Agent and Judge
-Responses API calls to the `LANGSMITH_PROJECT` project.
+calls to the `LANGSMITH_PROJECT` project.
 
 ## Chat
 
@@ -51,6 +66,7 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `memory/worker.py`: asynchronous per-loop memory extraction
 - `memory/consolidate.py`: locked staging-based periodic memory consolidation
 - `providers/openai/`: OpenAI Responses API client, serializers, and SSE handling
+- `providers/deepseek/`: DeepSeek Chat Completions client, serializers, and stream handling
 - `interfaces/tui.py`: curses frontend that talks to the backend through pipes
 - `tools/tool.py`: `ToolManager`, tool schemas, and tool-call execution
 
@@ -151,7 +167,7 @@ catalog. Selections clear after the message is accepted. `duckduckcode-eval`
 passes `enable_skills=False`, so evaluations do not read user or project Skill
 paths.
 
-The default model is `o4-mini`, a reasoning model. Reasoning effort defaults to `low`; CLI selection can be added later.
+The main-agent default is OpenAI `o4-mini`. Reasoning effort defaults to `low`.
 
 ## Subagents
 
@@ -171,8 +187,9 @@ seven fields are required; nullable values use JSON `null`:
 ```
 
 `subagent_type` selects a Definition. `null` creates a fork that inherits the
-parent abstraction, memory, completed conversation, model (unless overridden),
-permission mode, and persistent permission rules. Forks always run in the
+parent abstraction, memory, completed conversation, permission mode, and
+persistent permission rules. Subagents use `SUBAGENT_PROVIDER` and
+`SUBAGENT_MODEL`; a non-null tool `model` overrides only that model. Forks always run in the
 background. Definition subagents receive project startup instructions, their
 Definition body, and the assigned prompt, but no parent conversation. They are
 limited to `ReadFile`, `Glob`, and `Grep`, minus any tools listed by the
@@ -225,7 +242,10 @@ therefore permits only one such fork at a time: it holds a whole-task write leas
 that temporarily makes parent `WriteFile`, `EditFile`, and `Bash` calls return
 busy. Read-only Definition tasks and isolated forks can still run concurrently.
 
-`OpenAIClient.stream()` uses Responses API SSE streaming and yields internal stream events. The parser currently handles text deltas, function tool calls, errors, and completion.
+`OpenAIClient.stream()` uses Responses API SSE streaming. `DeepSeekClient.stream()`
+uses Chat Completions, converts the shared message/tool representation, assembles
+fragmented tool calls, and does not expose `reasoning_content`. Both yield the
+same internal text, tool-call, error/completion, and usage events.
 
 During streaming, `Agent.stream()` creates an empty assistant message, appends text deltas into it, then marks it `completed` or `error`. `Message.token_usage` records returned usage for now; token accounting can be added later.
 

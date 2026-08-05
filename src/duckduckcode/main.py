@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -29,7 +28,7 @@ from .permissions import (
     RulePolicy,
     check_bash_blacklist,
 )
-from .providers.openai.client import OpenAIClient
+from .providers import create_client
 from .tools import (
     create_bash_tool,
     create_edit_file_tool,
@@ -91,7 +90,7 @@ def main() -> None:
             print()
             return
         run_tui(
-            config.openai_model,
+            config.agent.model,
             str(workspace),
             permission_mode=RulePolicy.read_permission_mode(workspace),
         )
@@ -121,9 +120,13 @@ def build_agent(
     allowed_tools: set[str] | None = None,
     query_source: QuerySource = QuerySource.USER,
     force_os_sandbox: bool = False,
+    model_role: str = "agent",
+    model_override: str | None = None,
 ) -> Agent:
     path_sandbox = PathSandbox(workspace)
     try:
+        settings = getattr(config, model_role)
+        model = model_override or settings.model
         policy: RulePolicy | None = None
         os_sandbox = OSSandbox(
             workspace,
@@ -181,7 +184,7 @@ def build_agent(
             subagent_manager = SubagentManager(
                 workspace,
                 definitions=definition_manager,
-                parent_model=config.openai_model,
+                parent_model=config.subagent.model,
             )
         policy = RulePolicy.load(
             workspace,
@@ -195,7 +198,7 @@ def build_agent(
         context = ContextManager(
             system_prompt=build_system_prompt(
                 workspace,
-                model=config.openai_model,
+                model=model,
                 temporary_directory=path_sandbox.temporary_directory,
                 tool_result_directory=path_sandbox.tool_result_directory,
                 instructions=load_instructions(
@@ -223,13 +226,7 @@ def build_agent(
             SessionManager(workspace, context) if enable_sessions else None
         )
         return Agent(
-            OpenAIClient(
-                api_key=config.openai_api_key,
-                model=config.openai_model,
-                langsmith_tracing=config.langsmith_tracing,
-                langsmith_api_key=config.langsmith_api_key,
-                langsmith_project=config.langsmith_project,
-            ),
+            create_client(config, settings, model=model_override),
             context,
             tools,
             max_iterations=max_iterations or 50,
@@ -258,6 +255,7 @@ def build_agent(
                         enable_exit_plan_mode=False,
                         enable_subagents=False,
                         query_source=QuerySource.SUBAGENT,
+                        model_role="subagent",
                     )
                 )
                 if skill_manager is not None
@@ -278,8 +276,6 @@ def run_subagent_worker(config: Config) -> None:
     try:
         request = json.loads(line)
         workspace = Path(request["workspace"]).resolve()
-        if request.get("model"):
-            config = replace(config, openai_model=str(request["model"]))
         definition = request.get("definition")
         allowed = (
             DEFINITION_TOOLS - set(definition.get("disallowed_tools", ()))
@@ -301,6 +297,8 @@ def run_subagent_worker(config: Config) -> None:
             allowed_tools=allowed,
             query_source=QuerySource.SUBAGENT,
             force_os_sandbox=bool(request.get("isolation", False)),
+            model_role="subagent",
+            model_override=(str(request["model"]) if request.get("model") else None),
         )
         agent.set_permission_mode(request["permission_mode"])
         boilerplate = str(request.get("boilerplate", ""))

@@ -15,7 +15,7 @@ from typing import Any, Iterator
 
 from ..core.context import ContextManager, Message
 from ..core.event import ConversationEvent, DoneEvent, ErrorEvent, ToolCallEvent
-from ..providers.openai.client import OpenAIClient
+from ..providers import create_client
 from ..tools.tool import ToolCall, ToolManager, ToolResult
 from .long_term import (
     MEMORY_MAX_BYTES,
@@ -163,13 +163,7 @@ def _run_staged_consolidation(config: Any, manager: MemoryManager) -> None:
             staged_project,
             manager.workspace / ".duckduckcode" / "sessions",
         )
-        client = OpenAIClient(
-            api_key=config.openai_api_key,
-            model=config.openai_model,
-            langsmith_tracing=config.langsmith_tracing,
-            langsmith_api_key=config.langsmith_api_key,
-            langsmith_project=config.langsmith_project,
-        )
+        client = create_client(config, config.memory)
         try:
             _run_tool_loop(client, config.reasoning, tools, staging)
         finally:

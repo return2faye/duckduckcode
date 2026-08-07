@@ -35,6 +35,7 @@ from .event import (
 )
 from .prompts import COMPACTION_SYSTEM_PROMPT
 from .skill import SkillManager
+from .lsp import LSPManager
 from .mcp import MCPManager
 from .subagent import DefinitionManager, SubagentManager
 from ..permissions import PermissionChecker, PermissionMode
@@ -71,6 +72,8 @@ class Agent:
         subagent_manager: SubagentManager | None = None,
         query_source: QuerySource = QuerySource.USER,
         mcp_manager: MCPManager | None = None,
+        lsp_manager: LSPManager | None = None,
+        owns_lsp_manager: bool = False,
     ) -> None:
         if (
             isinstance(max_iterations, bool)
@@ -94,6 +97,9 @@ class Agent:
         self.query_source = query_source
         self.mcp_manager = mcp_manager
         self._mcp_initialized = False
+        self.lsp_manager = lsp_manager
+        self._owns_lsp_manager = owns_lsp_manager
+        self._lsp_initialized = False
         self._runtime_conversation_key = uuid4().hex
         self._skill_list_snapshot: tuple[dict[str, Any], ...] | None = None
         self._session_snapshot = (
@@ -128,6 +134,7 @@ class Agent:
         yield from self._refresh_skills(force=True)
         yield from self._refresh_definitions()
         yield from self._initialize_mcp()
+        yield from self._initialize_lsp()
         yield from self._startup_compaction()
         yield LoopCompleteEvent("completed", 0)
 
@@ -210,6 +217,7 @@ class Agent:
         self, user_message: str, selected_skills: list[str] | tuple[str, ...]
     ) -> Generator[AgentEvent, AgentResponse, None]:
         yield from self._initialize_mcp()
+        yield from self._initialize_lsp()
         memory_start = (
             len(self.session_manager.snapshot().records)
             if self.memory_manager is not None and self.session_manager is not None
@@ -1087,14 +1095,18 @@ class Agent:
                     self.mcp_manager.close()
             finally:
                 try:
-                    close = getattr(self.client, "close", None)
-                    if callable(close):
-                        close()
+                    if self.lsp_manager is not None and self._owns_lsp_manager:
+                        self.lsp_manager.close()
                 finally:
                     try:
-                        self.context.close()
+                        close = getattr(self.client, "close", None)
+                        if callable(close):
+                            close()
                     finally:
-                        self.permission_checker.close()
+                        try:
+                            self.context.close()
+                        finally:
+                            self.permission_checker.close()
 
     def _initialize_mcp(
         self,
@@ -1132,6 +1144,13 @@ class Agent:
         self.context.set_tool_schemas(self.tools.schemas())
         for warning in warnings:
             yield ErrorEvent(warning, "mcp")
+
+    def _initialize_lsp(self) -> Generator[AgentEvent, None, None]:
+        if self.lsp_manager is None or self._lsp_initialized:
+            return
+        self._lsp_initialized = True
+        for warning in self.lsp_manager.initialize():
+            yield ErrorEvent(warning, "lsp")
 
 
 def _extract_summary(output: str) -> str:

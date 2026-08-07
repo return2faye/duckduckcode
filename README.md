@@ -59,6 +59,7 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `core/context.py`: `Message`, system prompt, abstraction, tool schemas, and `ContextManager`
 - `core/event.py`: internal streaming and session lifecycle events
 - `core/mcp.py`: MCP configuration, transports, discovery, and `MCPTool` management
+- `core/lsp.py`: LSP configuration, stdio JSON-RPC, document sync, and navigation
 - `core/subagent.py`: subagent Definition discovery and worker lifecycle
 - `eval/`: benchmark loading, isolated execution, local result storage, and judging
 - `memory/instruction.py`: project and user instruction loading
@@ -145,6 +146,53 @@ The first MCP release intentionally omits prompts, sampling, OAuth, health
 checks, manager-level automatic reconnect, configuration hot reload, and
 dynamic `tools/list_changed` refresh. Restart DuckDuckCode after changing
 configuration or server tool definitions.
+
+## Language servers
+
+DuckDuckCode loads user-level LSP configuration once from
+`~/.duckduckcode/lsp.yaml`. The root is a server map; `command` and a non-empty
+`extensions` map are required:
+
+```yaml
+pyright:
+  command: pyright-langserver
+  args: ["--stdio"]
+  extensions:
+    ".py": python
+    ".pyi": python
+  env:
+    PYTHONPATH: "${PYTHONPATH}"
+  initialization_options: {}
+  settings: {}
+```
+
+Install each configured language server yourself and make its command available
+on the startup `PATH`. `${VAR}` expansion applies only to `env` values and uses
+the environment captured by `Config.from_env()`; a missing variable skips that
+server and emits one LSP warning. Empty files are valid. Symlinks, non-regular
+files, duplicate or unknown YAML fields, non-JSON-compatible options/settings,
+and files larger than 256 KiB are rejected. One invalid server does not hide
+valid sibling entries.
+
+When at least one server is valid, the model receives one strict, read-only
+`LSP` tool for `definition`, `references`, `hover`, `document_symbols`, and
+`workspace_symbols`. Every call selects an exact configured server. Source
+paths must resolve to regular UTF-8 files inside the workspace. Input lines and
+columns are 1-based Unicode code-point coordinates; returned JSON is the
+language server's unmodified result, including file URIs and native 0-based LSP
+positions. Because the tool is read-only, it is available in Plan Mode.
+
+Servers start lazily on first use in one background asyncio runtime. Startup is
+limited to 10 seconds, navigation requests to 30 seconds, and shutdown to 5
+seconds; timed-out requests receive `$/cancelRequest`. A failed or disconnected
+server is isolated and is not restarted in the current process. The main Agent
+owns the manager, while in-process Fork children register their own `LSP` tool
+bound to the same server sessions and do not close them. Definition workers,
+evaluation, and memory helpers disable LSP.
+
+The first LSP release intentionally omits diagnostics, completion, rename, code
+actions, workspace edits, TCP/socket transports, project-level configuration,
+automatic detection, file watchers, hot reload, and automatic reconnect.
 
 ## User and project instructions
 

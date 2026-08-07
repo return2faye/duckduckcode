@@ -48,6 +48,11 @@ class MainTest(unittest.TestCase):
         )
         mcp_home_patch.start()
         self.addCleanup(mcp_home_patch.stop)
+        lsp_home_patch = patch(
+            "duckduckcode.core.lsp.Path.home", return_value=Path(self.home.name)
+        )
+        lsp_home_patch.start()
+        self.addCleanup(lsp_home_patch.stop)
         worker_patch = patch("duckduckcode.memory.long_term.MemoryManager.spawn_worker")
         self.worker = worker_patch.start()
         self.addCleanup(worker_patch.stop)
@@ -102,6 +107,68 @@ class MainTest(unittest.TestCase):
 
             manager.assert_not_called()
             self.assertIsNone(agent.mcp_manager)
+
+    def test_build_agent_registers_configured_lsp_and_reports_config_warning_once(
+        self,
+    ) -> None:
+        config_path = Path(self.home.name) / ".duckduckcode" / "lsp.yaml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "pyright:\n"
+            "  command: pyright-langserver\n"
+            "  extensions: {'.py': python}\n"
+            "broken:\n"
+            "  command: broken\n"
+            "  extensions: {py: python}\n",
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with patch("duckduckcode.main.create_client", return_value=object()):
+                agent = build_agent(
+                    Config("test-key"),
+                    workspace,
+                    enable_sessions=False,
+                    enable_memory=False,
+                    enable_skills=False,
+                    enable_subagents=False,
+                    enable_mcp=False,
+                )
+            self.addCleanup(agent.close)
+
+            self.assertIn("LSP", [schema["name"] for schema in agent.tools.schemas()])
+            first = list(agent.initialize())
+            second = list(agent.initialize())
+            warnings = [
+                event
+                for event in [*first, *second]
+                if isinstance(event, ErrorEvent) and event.code == "lsp"
+            ]
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("broken", warnings[0].message)
+            self.assertIsNone(agent.lsp_manager._thread)
+
+    def test_build_agent_can_disable_lsp_for_auxiliary_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with (
+                patch("duckduckcode.main.create_client", return_value=object()),
+                patch("duckduckcode.main.LSPManager") as manager,
+            ):
+                agent = build_agent(
+                    Config("test-key"),
+                    workspace,
+                    enable_sessions=False,
+                    enable_memory=False,
+                    enable_skills=False,
+                    enable_subagents=False,
+                    enable_mcp=False,
+                    enable_lsp=False,
+                )
+            self.addCleanup(agent.close)
+
+            manager.assert_not_called()
+            self.assertIsNone(agent.lsp_manager)
 
     def test_subagent_worker_filters_definition_tools_and_emits_jsonl(self) -> None:
         calls = []
@@ -216,6 +283,31 @@ class MainTest(unittest.TestCase):
             self.assertNotIn(
                 "LoadSkill", [schema["name"] for schema in child.tools.schemas()]
             )
+
+    def test_fork_child_shares_parent_lsp_without_owning_it(self) -> None:
+        config_path = Path(self.home.name) / ".duckduckcode" / "lsp.yaml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "pyright:\n"
+            "  command: pyright-langserver\n"
+            "  extensions: {'.py': python}\n",
+            encoding="utf-8",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with patch(
+                "duckduckcode.main.create_client",
+                side_effect=lambda *_args, **_kwargs: object(),
+            ):
+                parent = build_agent(Config("test-key"), workspace, enable_mcp=False)
+                child = parent._fork_agent_factory()
+
+            self.assertIs(child.lsp_manager, parent.lsp_manager)
+            self.assertIn("LSP", [schema["name"] for schema in child.tools.schemas()])
+            child.close()
+            self.assertFalse(parent.lsp_manager._closed)
+            parent.close()
+            self.assertTrue(parent.lsp_manager._closed)
 
     def test_build_agent_injects_workspace_into_system_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

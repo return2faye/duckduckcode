@@ -9,6 +9,7 @@ from .config import Config
 from .core.agent import Agent, _fork_system_prompt
 from .core.context import ContextManager, Message
 from .core.mcp import MCPManager
+from .core.lsp import LSPManager
 from .core.event import (
     ConversationEvent,
     ErrorEvent,
@@ -35,6 +36,7 @@ from .tools import (
     create_edit_file_tool,
     create_glob_tool,
     create_grep_tool,
+    create_lsp_tool,
     create_read_file_tool,
     create_write_file_tool,
 )
@@ -56,6 +58,7 @@ _PERMISSION_TOOL_NAMES = {
     "Bash",
     "LoadSkill",
     "Agent",
+    "LSP",
 }
 
 
@@ -119,6 +122,8 @@ def build_agent(
     enable_exit_plan_mode: bool = True,
     enable_subagents: bool = True,
     enable_mcp: bool = True,
+    enable_lsp: bool = True,
+    lsp_manager: LSPManager | None = None,
     allowed_tools: set[str] | None = None,
     query_source: QuerySource = QuerySource.USER,
     force_os_sandbox: bool = False,
@@ -140,6 +145,12 @@ def build_agent(
         mcp_manager = (
             MCPManager(workspace, config.environment, tools) if enable_mcp else None
         )
+        owns_lsp_manager = False
+        if enable_lsp and lsp_manager is None:
+            lsp_manager = LSPManager(workspace, config.environment)
+            owns_lsp_manager = True
+        elif not enable_lsp:
+            lsp_manager = None
         skill_manager = (
             SkillManager(workspace, builtin_commands=_builtin_slash_commands())
             if enable_skills
@@ -191,6 +202,8 @@ def build_agent(
                 definitions=definition_manager,
                 parent_model=config.subagent.model,
             )
+        if lsp_manager is not None and lsp_manager.server_names and enabled("LSP"):
+            tools.register(create_lsp_tool(lsp_manager))
         policy = RulePolicy.load(
             workspace,
             path_sandbox.temporary_directory,
@@ -261,6 +274,8 @@ def build_agent(
                         enable_exit_plan_mode=False,
                         enable_subagents=False,
                         enable_mcp=False,
+                        enable_lsp=lsp_manager is not None,
+                        lsp_manager=lsp_manager,
                         query_source=QuerySource.SUBAGENT,
                         model_role="subagent",
                     )
@@ -272,8 +287,13 @@ def build_agent(
             subagent_manager=subagent_manager,
             query_source=query_source,
             mcp_manager=mcp_manager,
+            lsp_manager=lsp_manager,
+            owns_lsp_manager=owns_lsp_manager,
         )
     except Exception:
+        if "owns_lsp_manager" in locals() and owns_lsp_manager:
+            assert lsp_manager is not None
+            lsp_manager.close()
         path_sandbox.close()
         raise
 
@@ -303,6 +323,7 @@ def run_subagent_worker(config: Config) -> None:
             enable_exit_plan_mode=False,
             enable_subagents=False,
             enable_mcp=False,
+            enable_lsp=False,
             allowed_tools=allowed,
             query_source=QuerySource.SUBAGENT,
             force_os_sandbox=bool(request.get("isolation", False)),

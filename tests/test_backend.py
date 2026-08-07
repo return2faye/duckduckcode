@@ -276,6 +276,36 @@ class BackendTest(unittest.TestCase):
             ],
         )
 
+    def test_backend_round_trips_initialize_permission_responses(self) -> None:
+        choices = []
+
+        class FakeAgent:
+            def initialize(self):
+                choice = yield PermissionRequestEvent(
+                    "mcp_project_config",
+                    "MCP",
+                    '[{"server": "files", "transport": "stdio"}]',
+                    "approve project MCP configuration",
+                )
+                choices.append(choice)
+                yield LoopCompleteEvent("completed", 0)
+
+        output = io.StringIO()
+        run_backend(
+            FakeAgent(),
+            input_stream=io.StringIO(
+                '{"type": "initialize"}\n'
+                '{"type": "permission_response", '
+                '"call_id": "mcp_project_config", "decision": "allow_once"}\n'
+            ),
+            output_stream=output,
+        )
+
+        self.assertEqual(choices, ["allow_once"])
+        self.assertEqual(
+            json.loads(output.getvalue().splitlines()[-1])["reason"], "completed"
+        )
+
     def test_backend_streams_json_lines_for_each_prompt(self) -> None:
         calls = []
 

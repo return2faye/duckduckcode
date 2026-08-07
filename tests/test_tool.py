@@ -17,6 +17,18 @@ def raise_error(message: str) -> None:
 
 
 class ToolTest(unittest.TestCase):
+    def test_tool_schema_can_disable_strict_validation(self) -> None:
+        tool = create_tool(
+            "remote",
+            "Remote tool",
+            {"type": "object"},
+            lambda **arguments: arguments,
+            lambda arguments: arguments,
+            strict=False,
+        )
+
+        self.assertFalse(tool.schema()["strict"])
+
     def test_exit_plan_mode_tool_has_no_arguments_and_cannot_execute_directly(
         self,
     ) -> None:

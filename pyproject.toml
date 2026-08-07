@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "langsmith>=0.10.15",
+    "mcp>=1.28,<2",
     "openai>=2.50.0",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",

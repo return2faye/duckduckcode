@@ -61,7 +61,7 @@ def run_backend(
                     continue
                 if data.get("type") == "initialize":
                     active = True
-                    _run_events(agent.initialize(), output_stream)
+                    _run_initialize(agent.initialize(), input_stream, output_stream)
                     continue
                 if data.get("type") == "sessions":
                     active = True
@@ -149,6 +149,28 @@ def _run_stream(
 
 def _run_compact(agent: Agent, output_stream: TextIO) -> None:
     _run_events(agent.compact(), output_stream)
+
+
+def _run_initialize(
+    stream: object, input_stream: TextIO, output_stream: TextIO
+) -> None:
+    try:
+        event = next(stream)
+        while True:
+            output_stream.write(json.dumps(_event_to_json(event)) + "\n")
+            output_stream.flush()
+            if isinstance(event, PermissionRequestEvent):
+                event = stream.send(
+                    _read_permission_response(input_stream, event.call_id)
+                )
+            else:
+                event = next(stream)
+    except StopIteration:
+        return
+    finally:
+        close = getattr(stream, "close", None)
+        if close is not None:
+            close()
 
 
 def _run_status(agent: Agent, output_stream: TextIO) -> None:

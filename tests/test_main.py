@@ -43,6 +43,11 @@ class MainTest(unittest.TestCase):
         )
         skill_home_patch.start()
         self.addCleanup(skill_home_patch.stop)
+        mcp_home_patch = patch(
+            "duckduckcode.core.mcp.Path.home", return_value=Path(self.home.name)
+        )
+        mcp_home_patch.start()
+        self.addCleanup(mcp_home_patch.stop)
         worker_patch = patch("duckduckcode.memory.long_term.MemoryManager.spawn_worker")
         self.worker = worker_patch.start()
         self.addCleanup(worker_patch.stop)
@@ -76,6 +81,27 @@ class MainTest(unittest.TestCase):
                 agent.plan_file,
                 workspace.resolve() / ".duckduckcode" / "plan.md",
             )
+
+    def test_build_agent_can_disable_mcp_for_auxiliary_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            with (
+                patch("duckduckcode.main.create_client", return_value=object()),
+                patch("duckduckcode.main.MCPManager") as manager,
+            ):
+                agent = build_agent(
+                    Config("test-key"),
+                    workspace,
+                    enable_sessions=False,
+                    enable_memory=False,
+                    enable_skills=False,
+                    enable_subagents=False,
+                    enable_mcp=False,
+                )
+            self.addCleanup(agent.close)
+
+            manager.assert_not_called()
+            self.assertIsNone(agent.mcp_manager)
 
     def test_subagent_worker_filters_definition_tools_and_emits_jsonl(self) -> None:
         calls = []

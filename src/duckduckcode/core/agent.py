@@ -35,6 +35,7 @@ from .event import (
 )
 from .prompts import COMPACTION_SYSTEM_PROMPT
 from .skill import SkillManager
+from .mcp import MCPManager
 from .subagent import DefinitionManager, SubagentManager
 from ..permissions import PermissionChecker, PermissionMode
 from ..tools.tool import (
@@ -67,6 +68,7 @@ class Agent:
         definition_manager: DefinitionManager | None = None,
         subagent_manager: SubagentManager | None = None,
         query_source: QuerySource = QuerySource.USER,
+        mcp_manager: MCPManager | None = None,
     ) -> None:
         if (
             isinstance(max_iterations, bool)
@@ -88,6 +90,8 @@ class Agent:
         self.definition_manager = definition_manager
         self.subagent_manager = subagent_manager
         self.query_source = query_source
+        self.mcp_manager = mcp_manager
+        self._mcp_initialized = False
         self._runtime_conversation_key = uuid4().hex
         self._skill_list_snapshot: tuple[dict[str, Any], ...] | None = None
         self._session_snapshot = (
@@ -116,11 +120,12 @@ class Agent:
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self.permission_checker.set_permission_mode(mode)
 
-    def initialize(self) -> Generator[AgentEvent, None, None]:
+    def initialize(self) -> Generator[AgentEvent, AgentResponse, None]:
         if self._session_snapshot is not None:
             yield _session_state("initialized", self._session_snapshot)
         yield from self._refresh_skills(force=True)
         yield from self._refresh_definitions()
+        yield from self._initialize_mcp()
         yield from self._startup_compaction()
         yield LoopCompleteEvent("completed", 0)
 
@@ -199,6 +204,7 @@ class Agent:
     def _stream(
         self, user_message: str, selected_skills: list[str] | tuple[str, ...]
     ) -> Generator[AgentEvent, AgentResponse, None]:
+        yield from self._initialize_mcp()
         memory_start = (
             len(self.session_manager.snapshot().records)
             if self.memory_manager is not None and self.session_manager is not None
@@ -1060,14 +1066,38 @@ class Agent:
                 self.subagent_manager.close()
         finally:
             try:
-                close = getattr(self.client, "close", None)
-                if callable(close):
-                    close()
+                if self.mcp_manager is not None:
+                    self.mcp_manager.close()
             finally:
                 try:
-                    self.context.close()
+                    close = getattr(self.client, "close", None)
+                    if callable(close):
+                        close()
                 finally:
-                    self.permission_checker.close()
+                    try:
+                        self.context.close()
+                    finally:
+                        self.permission_checker.close()
+
+    def _initialize_mcp(
+        self,
+    ) -> Generator[AgentEvent, AgentResponse, None]:
+        if self.mcp_manager is None or self._mcp_initialized:
+            return
+        request = self.mcp_manager.permission_request()
+        choice: PermissionChoice | None = None
+        if request is not None:
+            choice = yield PermissionRequestEvent(
+                "mcp_project_config",
+                "MCP",
+                request.content,
+                request.message,
+            )
+        warnings = self.mcp_manager.initialize(choice)
+        self._mcp_initialized = True
+        self.context.set_tool_schemas(self.tools.schemas())
+        for warning in warnings:
+            yield ErrorEvent(warning, "mcp")
 
 
 def _extract_summary(output: str) -> str:

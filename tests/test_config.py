@@ -8,7 +8,8 @@ from duckduckcode.core.context import ReasoningConfig
 
 class ConfigTest(unittest.TestCase):
     def test_loads_defaults_and_environment(self) -> None:
-        config = Config.from_env({"OPENAI_API_KEY": "key"})
+        environment = {"OPENAI_API_KEY": "key", "MCP_TOKEN": "secret"}
+        config = Config.from_env(environment)
 
         self.assertEqual(config.openai_api_key, "key")
         self.assertEqual(config.openai_model, "o4-mini")
@@ -22,6 +23,8 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.subagent, ModelConfig("openai", "o4-mini"))
         self.assertEqual(config.memory, ModelConfig("openai", "o4-mini"))
         self.assertEqual(config.judge, ModelConfig("openai", "gpt-5.6-terra"))
+        self.assertEqual(config.environment, environment)
+        self.assertNotIn("secret", repr(config))
 
     def test_environment_overrides_defaults(self) -> None:
         config = Config.from_env(

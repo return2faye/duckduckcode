@@ -8,8 +8,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .superpowers/
+.reasonix
 /.duckduckcode/permissions.local.yaml
 /.duckduckcode/plan.md
+/.duckduckcode/mcp.trust
 /.duckduckcode/evals.sqlite3
 /.duckduckcode/eval-report.html
 /.duckduckcode/eval-reports/

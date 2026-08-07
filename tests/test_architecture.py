@@ -28,6 +28,7 @@ EXPECTED_MODULES = {
     "core/client.py",
     "core/context.py",
     "core/event.py",
+    "core/mcp.py",
     "core/skill.py",
     "core/subagent.py",
     "interfaces/__init__.py",

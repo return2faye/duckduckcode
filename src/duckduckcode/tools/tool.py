@@ -34,6 +34,7 @@ class Tool:
     is_dangerous: bool = False
     is_concurrency_safe: bool = False
     category: str = "general"
+    strict: bool = True
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -41,7 +42,7 @@ class Tool:
             "name": self.name,
             "description": self.description,
             "parameters": self.params,
-            "strict": True,
+            "strict": self.strict,
         }
 
 
@@ -65,6 +66,7 @@ def create_tool(
     is_dangerous: bool = False,
     is_concurrency_safe: bool = False,
     category: str = "general",
+    strict: bool = True,
 ) -> Tool:
     return Tool(
         name,
@@ -76,6 +78,7 @@ def create_tool(
         is_dangerous,
         is_concurrency_safe,
         category,
+        strict,
     )
 
 
@@ -235,6 +238,7 @@ class ToolManager:
         is_dangerous: bool = False,
         is_concurrency_safe: bool = False,
         category: str = "general",
+        strict: bool = True,
     ) -> None:
         if isinstance(name, Tool):
             if (
@@ -246,6 +250,7 @@ class ToolManager:
                 or is_dangerous
                 or is_concurrency_safe
                 or category != "general"
+                or not strict
             ):
                 raise TypeError("A Tool cannot be combined with registration arguments")
             registered = name
@@ -264,6 +269,7 @@ class ToolManager:
                 is_dangerous=is_dangerous,
                 is_concurrency_safe=is_concurrency_safe,
                 category=category,
+                strict=strict,
             )
         self._tools[registered.name] = registered
 

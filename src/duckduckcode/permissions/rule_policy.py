@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 import glob
+import json
 import os
 from pathlib import Path, PurePosixPath
 import tempfile
@@ -24,6 +25,7 @@ _ACTION_BY_NAME: dict[str, RuleAction] = {
     "allow": "allow",
 }
 _PATH_TOOLS = frozenset({"ReadFile", "WriteFile", "EditFile", "Glob", "Grep"})
+_MCP_PREFIX = "mcp__"
 
 
 @dataclass(frozen=True)
@@ -283,6 +285,17 @@ class RulePolicy:
                 os.unlink(temporary_path)
 
     def _content(self, tool_call: ToolCall) -> str | None:
+        if tool_call.name.startswith(_MCP_PREFIX):
+            try:
+                return json.dumps(
+                    tool_call.arguments,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            except (TypeError, ValueError):
+                return None
         if tool_call.name == "Bash":
             command = tool_call.arguments.get("command")
             network_access = tool_call.arguments.get("network_access", False)
@@ -306,7 +319,7 @@ class RulePolicy:
             return None
 
     def _stored_pattern(self, tool_name: str, content: str) -> str:
-        if tool_name == "Bash":
+        if tool_name == "Bash" or tool_name.startswith(_MCP_PREFIX):
             return glob.escape(content)
         path = Path(content)
         if path.is_relative_to(self.workspace):
@@ -423,7 +436,9 @@ def _load_tool_rules(
                 )
             permission_mode = entries
             continue
-        if not isinstance(tool_name, str) or tool_name not in known_tools:
+        if not isinstance(tool_name, str) or (
+            tool_name not in known_tools and not tool_name.startswith(_MCP_PREFIX)
+        ):
             raise RuntimeError(
                 f"Permission file '{path}' references unknown tool '{tool_name}'."
             )
@@ -448,9 +463,10 @@ def _load_tool_rules(
                     f"Permission file '{path}' has invalid action '{action}'."
                 )
             normalized = {"content": content, "action": action}
-            if normalized in data[tool_name]:
+            tool_data = data.setdefault(tool_name, [])
+            if normalized in tool_data:
                 continue
-            data[tool_name].append(normalized)
+            tool_data.append(normalized)
             rules.append(
                 _build_rule(
                     _ACTION_BY_NAME[action],
@@ -493,7 +509,7 @@ def _build_rule(
 
 
 def _matches(rule: _Rule, content: str) -> bool:
-    if rule.tool_name == "Bash":
+    if rule.tool_name == "Bash" or rule.tool_name.startswith(_MCP_PREFIX):
         return fnmatchcase(content, rule.pattern)
     return _matches_glob(
         PurePosixPath(content).parts,

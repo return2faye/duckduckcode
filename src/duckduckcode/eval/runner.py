@@ -162,6 +162,7 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
                 enable_sessions=False,
                 enable_memory=False,
                 enable_skills=False,
+                enable_mcp=False,
             )
             agent.set_permission_mode("accept_edits")
             completed = True

@@ -8,6 +8,7 @@ import sys
 from .config import Config
 from .core.agent import Agent, _fork_system_prompt
 from .core.context import ContextManager, Message
+from .core.mcp import MCPManager
 from .core.event import (
     ConversationEvent,
     ErrorEvent,
@@ -117,6 +118,7 @@ def build_agent(
     enable_skills: bool = True,
     enable_exit_plan_mode: bool = True,
     enable_subagents: bool = True,
+    enable_mcp: bool = True,
     allowed_tools: set[str] | None = None,
     query_source: QuerySource = QuerySource.USER,
     force_os_sandbox: bool = False,
@@ -135,6 +137,9 @@ def build_agent(
             or (policy is not None and policy.permission_mode != "full_access"),
         )
         tools = ToolManager(source=query_source)
+        mcp_manager = (
+            MCPManager(workspace, config.environment, tools) if enable_mcp else None
+        )
         skill_manager = (
             SkillManager(workspace, builtin_commands=_builtin_slash_commands())
             if enable_skills
@@ -254,6 +259,7 @@ def build_agent(
                         enable_skills=False,
                         enable_exit_plan_mode=False,
                         enable_subagents=False,
+                        enable_mcp=False,
                         query_source=QuerySource.SUBAGENT,
                         model_role="subagent",
                     )
@@ -264,6 +270,7 @@ def build_agent(
             definition_manager=definition_manager,
             subagent_manager=subagent_manager,
             query_source=query_source,
+            mcp_manager=mcp_manager,
         )
     except Exception:
         path_sandbox.close()
@@ -294,6 +301,7 @@ def run_subagent_worker(config: Config) -> None:
             enable_skills=False,
             enable_exit_plan_mode=False,
             enable_subagents=False,
+            enable_mcp=False,
             allowed_tools=allowed,
             query_source=QuerySource.SUBAGENT,
             force_os_sandbox=bool(request.get("isolation", False)),

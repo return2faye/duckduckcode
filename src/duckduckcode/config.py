@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Mapping
+from types import MappingProxyType
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
@@ -32,6 +33,9 @@ class Config:
     subagent: ModelConfig = ModelConfig("openai", "o4-mini")
     memory: ModelConfig = ModelConfig("openai", "o4-mini")
     judge: ModelConfig = ModelConfig("openai", "gpt-5.6-terra")
+    environment: Mapping[str, str] = field(
+        default_factory=dict, repr=False, compare=False
+    )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -95,6 +99,7 @@ class Config:
             subagent=subagent,
             memory=memory,
             judge=judge,
+            environment=MappingProxyType(dict(env)),
         )
 
 

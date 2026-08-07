@@ -23,12 +23,66 @@ from duckduckcode.permissions import (
     PathSandbox,
     PermissionChecker,
     PermissionDecision,
+    RulePolicy,
     check_bash_blacklist,
 )
 from duckduckcode.tools.tool import ToolCall, ToolManager, create_tool
 
 
 class PermissionCheckerTest(unittest.TestCase):
+    def test_mcp_arguments_are_exact_persistable_permission_content(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace_dir,
+            tempfile.TemporaryDirectory() as home_dir,
+        ):
+            workspace = Path(workspace_dir)
+            temporary = workspace / "tmp"
+            temporary.mkdir()
+            policy = RulePolicy.load(
+                workspace,
+                temporary,
+                {"Bash"},
+                home=Path(home_dir),
+            )
+            tool = create_tool(
+                "mcp__docs__search",
+                "search",
+                {"type": "object"},
+                lambda **arguments: arguments,
+                lambda arguments: arguments,
+                strict=False,
+                category="mcp",
+            )
+            call = ToolCall("one", "mcp__docs__search", {"limit": 3, "query": "duck"})
+
+            self.assertEqual(
+                PermissionChecker(policy=policy).check(call, tool=tool).action, "ask"
+            )
+            policy.remember_allow(call)
+            reloaded = RulePolicy.load(
+                workspace,
+                temporary,
+                {"Bash"},
+                home=Path(home_dir),
+            )
+
+            self.assertEqual(
+                reloaded.check(
+                    ToolCall(
+                        "two",
+                        "mcp__docs__search",
+                        {"query": "duck", "limit": 3},
+                    )
+                ).action,
+                "allow",
+            )
+            self.assertEqual(
+                reloaded.check(
+                    ToolCall("three", "mcp__docs__search", {"query": "goose"})
+                ).action,
+                "ask",
+            )
+
     def setUp(self) -> None:
         self.checker = PermissionChecker([check_bash_blacklist])
 
@@ -235,6 +289,15 @@ class PermissionCheckerTest(unittest.TestCase):
             lambda path, content: content,
             lambda arguments: arguments,
         )
+        mcp = create_tool(
+            "mcp__docs__search",
+            "search",
+            {"type": "object", "properties": {}},
+            lambda **arguments: arguments,
+            lambda arguments: arguments,
+            category="mcp",
+            strict=False,
+        )
         bash = create_tool(
             "Bash",
             "bash",
@@ -298,6 +361,11 @@ class PermissionCheckerTest(unittest.TestCase):
             (
                 ToolCall("checkout", "Bash", {"command": "git checkout main"}),
                 bash,
+                "deny",
+            ),
+            (
+                ToolCall("mcp", "mcp__docs__search", {"query": "duck"}),
+                mcp,
                 "deny",
             ),
             (

@@ -58,6 +58,7 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `config.py`: startup configuration loaded from environment variables
 - `core/context.py`: `Message`, system prompt, abstraction, tool schemas, and `ContextManager`
 - `core/event.py`: internal streaming and session lifecycle events
+- `core/mcp.py`: MCP configuration, transports, discovery, and tool adaptation
 - `core/subagent.py`: subagent Definition discovery and worker lifecycle
 - `eval/`: benchmark loading, isolated execution, local result storage, and judging
 - `memory/instruction.py`: project and user instruction loading
@@ -75,6 +76,65 @@ summary, long-term-memory snapshot, and stale-session reminder next, then user,
 assistant, tool-call, and tool-result messages.
 
 `Agent` owns `ToolManager`, passes tool schemas into `ContextManager`, executes returned tool calls, appends the tool call/result messages, then asks the model again for the final answer.
+
+## MCP servers
+
+DuckDuckCode loads MCP servers once at startup from these files, with a project
+entry replacing the complete user entry that has the same server name:
+
+1. `~/.duckduckcode/mcp.yaml`
+2. `<workspace>/.duckduckcode/mcp.yaml`
+
+The root is a server map. Stdio servers accept only `type`, `command`, `args`,
+and `env`; Streamable HTTP servers accept only `type`, `url`, and `headers`:
+
+```yaml
+files:
+  type: stdio
+  command: npx
+  args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+  env:
+    TOKEN: "${FILES_TOKEN}"
+
+remote:
+  type: http
+  url: https://example.com/mcp
+  headers:
+    Authorization: "Bearer ${MCP_TOKEN}"
+```
+
+`${VAR}` expansion applies only to `env` and `headers` values, using the
+startup environment captured by `Config.from_env()`. A missing variable skips
+that server and emits an MCP warning. Empty files are valid. Symlinks,
+non-regular files, duplicate YAML fields, unknown transport fields, invalid
+HTTP(S) URLs, and files larger than 256 KiB are rejected; one invalid server
+does not prevent valid sibling servers from starting.
+
+User configuration is trusted automatically. New or changed project
+configuration asks for approval before any connection or process starts. The
+approval shows only server names, transports, command/args, or URLs—never env
+or header values. “Allow once” lasts for the process; “always allow” atomically
+stores the exact file digest in ignored `.duckduckcode/mcp.trust`; denial uses
+only the user layer. Non-interactive CLI runs deny an untrusted project layer.
+
+Discovered tools are named `mcp__<server>__<tool>` and use their MCP input
+schema with non-strict model validation. Names must contain only letters,
+digits, underscores, or hyphens and be at most 64 characters. MCP tools are
+always treated as potentially side-effecting: Plan Mode blocks them, while
+other modes use the normal permission panel. “Always allow” stores an exact,
+canonical JSON argument match in project-local permission rules.
+
+Servers initialize concurrently with a 10-second per-server limit. Tool calls
+have a 60-second limit. A failed, timed-out, or disconnected session does not
+stop other servers and is not recreated by DuckDuckCode. The SDK remains
+responsible for protocol-level SSE resumption inside a live Streamable HTTP
+session. Sessions, HTTP clients, and stdio processes remain open until the
+Agent closes.
+
+The first MCP release intentionally omits resources, prompts, sampling, OAuth,
+health checks, manager-level automatic reconnect, configuration hot reload, and
+dynamic `tools/list_changed` refresh. Restart DuckDuckCode after changing
+configuration or server tool definitions.
 
 ## User and project instructions
 

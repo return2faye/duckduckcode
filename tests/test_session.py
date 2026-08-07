@@ -203,6 +203,132 @@ class SessionManagerTest(unittest.TestCase):
         self.assertEqual(replacement.records, ())
         self.assertFalse((manager.directory / f"{original.session_id}.jsonl").exists())
 
+    def test_agent_restores_mcp_state_and_schemas_on_each_session_switch(self) -> None:
+        context = ContextManager(system_prompt="system")
+        session_manager = self.manager(context)
+        tools = ToolManager()
+
+        class MCP:
+            def __init__(self):
+                self.restored = []
+
+            def permission_request(self):
+                return None
+
+            def initialize(self, choice):
+                return []
+
+            def catalog_block(self):
+                return ""
+
+            def restore_session(self, records):
+                self.restored.append(list(records))
+                return ["restore warning"]
+
+        class Client:
+            def stream(self, messages, tools=None, reasoning=None):
+                yield DoneEvent()
+
+        mcp = MCP()
+        agent = Agent(
+            Client(),
+            context,
+            tools,
+            session_manager=session_manager,
+            mcp_manager=mcp,
+        )
+        list(agent.initialize())
+        session_manager.commit_message("user", "old session")
+        old_session = session_manager.current_session_id
+        mcp.restored.clear()
+
+        switches = [
+            ("after-new", agent.new_session),
+            ("after-resume", lambda: agent.resume_session(old_session)),
+            ("after-delete", agent.delete_session),
+        ]
+        for tool_name, switch in switches:
+            tools.register(
+                tool_name,
+                tool_name,
+                {"type": "object"},
+                lambda: "ok",
+            )
+
+            events = list(switch())
+
+            self.assertEqual(
+                mcp.restored[-1],
+                [record.as_dict() for record in session_manager.snapshot().records],
+            )
+            self.assertEqual(
+                [event for event in events if isinstance(event, ErrorEvent)],
+                [ErrorEvent("restore warning", "mcp")],
+            )
+            self.assertEqual(context.tool_schemas(), tools.schemas())
+
+        self.assertEqual(len(mcp.restored), 3)
+
+    def test_mcp_restore_receives_load_history_before_compaction(self) -> None:
+        original_context = ContextManager(system_prompt="system")
+        original = self.manager(original_context)
+        snapshot = original.start()
+        call = ToolCall(
+            "load",
+            "LoadTools",
+            {"names": ["mcp__docs__search"]},
+        )
+        original.commit_tool_call(call)
+        original.commit_tool_result(call, ToolResult("loaded"))
+        original.commit_compaction("summary", 2)
+
+        restored_context = ContextManager(system_prompt="system")
+        restored_sessions = self.manager(restored_context)
+
+        class MCP:
+            def __init__(self):
+                self.restored = []
+
+            def permission_request(self):
+                return None
+
+            def initialize(self, choice):
+                return []
+
+            def catalog_block(self):
+                return ""
+
+            def restore_session(self, records):
+                self.restored = list(records)
+                return []
+
+        mcp = MCP()
+        agent = Agent(
+            object(),
+            restored_context,
+            ToolManager(),
+            session_manager=restored_sessions,
+            mcp_manager=mcp,
+        )
+
+        list(agent.resume_session(snapshot.session_id))
+        list(agent.initialize())
+
+        self.assertEqual(
+            [record["context"]["type"] for record in mcp.restored],
+            ["tool_call", "tool_result", "compaction"],
+        )
+        self.assertEqual(
+            mcp.restored[0]["context"],
+            {
+                "type": "tool_call",
+                "call_id": "load",
+                "name": "LoadTools",
+                "arguments": {"names": ["mcp__docs__search"]},
+            },
+        )
+        self.assertFalse(mcp.restored[1]["context"]["is_error"])
+
     def test_agent_persists_calls_before_tools_run_and_replays_complete_chain(
         self,
     ) -> None:

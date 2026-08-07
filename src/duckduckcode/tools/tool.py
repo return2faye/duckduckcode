@@ -220,6 +220,7 @@ class ToolManager:
     def __init__(self, source: QuerySource = QuerySource.USER) -> None:
         self._tools: dict[str, Tool] = {}
         self.source = source
+        self._dirty = True
 
     def register(
         self,
@@ -267,9 +268,23 @@ class ToolManager:
                 strict=strict,
             )
         self._tools[registered.name] = registered
+        self._dirty = True
+
+    def unregister(self, name: str) -> Tool | None:
+        removed = self._tools.pop(name, None)
+        if removed is not None:
+            self._dirty = True
+        return removed
 
     def schemas(self) -> list[dict[str, Any]]:
         return [tool.schema() for tool in self._tools.values()]
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    def mark_clean(self) -> None:
+        self._dirty = False
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)

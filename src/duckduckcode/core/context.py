@@ -102,6 +102,7 @@ class ContextManager:
         )
         self.abstraction = abstraction
         self.long_term_memory = long_term_memory
+        self.mcp_catalog = ""
         self.skill_catalog = ""
         self.active_skills = ""
         self.reasoning = reasoning or ReasoningConfig()
@@ -237,6 +238,8 @@ class ContextManager:
             )
         if self.long_term_memory:
             messages.append(Message("system", self.long_term_memory))
+        if self.mcp_catalog:
+            messages.append(Message("system", self.mcp_catalog))
         if self.skill_catalog:
             messages.append(Message("system", self.skill_catalog))
         if self.active_skills:
@@ -330,6 +333,9 @@ class ContextManager:
 
     def set_long_term_memory(self, memory: str) -> None:
         self.long_term_memory = memory
+
+    def set_mcp_catalog(self, catalog: str) -> None:
+        self.mcp_catalog = catalog
 
     def set_skill_catalog(self, catalog: str) -> None:
         self.skill_catalog = catalog

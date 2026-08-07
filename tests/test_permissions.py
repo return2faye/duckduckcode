@@ -360,6 +360,14 @@ class PermissionCheckerTest(unittest.TestCase):
             category="mcp",
             strict=False,
         )
+        loader = create_tool(
+            "LoadTools",
+            "load MCP schemas",
+            {"type": "object", "properties": {}},
+            lambda **arguments: arguments,
+            lambda arguments: arguments,
+            is_read_only=True,
+        )
         bash = create_tool(
             "Bash",
             "bash",
@@ -424,6 +432,11 @@ class PermissionCheckerTest(unittest.TestCase):
                 ToolCall("checkout", "Bash", {"command": "git checkout main"}),
                 bash,
                 "deny",
+            ),
+            (
+                ToolCall("load", "LoadTools", {"names": ["mcp__docs__search"]}),
+                loader,
+                "allow",
             ),
             (
                 ToolCall("mcp", "mcp__docs__search", {"query": "duck"}),

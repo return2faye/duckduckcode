@@ -17,6 +17,19 @@ def raise_error(message: str) -> None:
 
 
 class ToolTest(unittest.TestCase):
+    def test_unregister_returns_exact_tool_and_preserves_remaining_order(self) -> None:
+        tools = ToolManager()
+        first = create_tool("first", "first", {}, lambda: "first", lambda value: value)
+        second = create_tool(
+            "second", "second", {}, lambda: "second", lambda value: value
+        )
+        tools.register(first)
+        tools.register(second)
+
+        self.assertIs(tools.unregister("first"), first)
+        self.assertIsNone(tools.unregister("first"))
+        self.assertEqual([schema["name"] for schema in tools.schemas()], ["second"])
+
     def test_registry_executes_any_tool_protocol_implementation(self) -> None:
         class ExternalTool:
             name = "external"

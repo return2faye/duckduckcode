@@ -151,6 +151,7 @@ class Agent:
         self._ensure_session_switch_allowed()
         snapshot = self._require_sessions().create()
         self._session_snapshot = snapshot
+        yield from self._restore_mcp_session(snapshot)
         self._startup_checked = False
         yield _session_state("new", snapshot)
         yield from self._startup_compaction()
@@ -160,6 +161,7 @@ class Agent:
         self._ensure_session_switch_allowed()
         snapshot = self._require_sessions().resume(session_id)
         self._session_snapshot = snapshot
+        yield from self._restore_mcp_session(snapshot)
         self._startup_checked = False
         yield _session_state("resumed", snapshot)
         yield from self._startup_compaction()
@@ -174,6 +176,7 @@ class Agent:
             self.subagent_manager.terminate_session(target)
         snapshot = self._require_sessions().delete(session_id)
         self._session_snapshot = snapshot
+        yield from self._restore_mcp_session(snapshot)
         self._startup_checked = False
         yield _session_state("deleted", snapshot)
         yield LoopCompleteEvent("completed", 0)
@@ -726,6 +729,9 @@ class Agent:
             )
         )
         self._sync_active_skills()
+        if self.tools.dirty:
+            self.context.set_tool_schemas(self.tools.schemas())
+            self.tools.mark_clean()
         return completed
 
     def list_skills(self) -> Generator[AgentEvent, None, None]:
@@ -1106,6 +1112,23 @@ class Agent:
             )
         warnings = self.mcp_manager.initialize(choice)
         self._mcp_initialized = True
+        self.context.set_mcp_catalog(self.mcp_manager.catalog_block())
+        if self._session_snapshot is not None:
+            warnings.extend(
+                self.mcp_manager.restore_session(
+                    tuple(record.as_dict() for record in self._session_snapshot.records)
+                )
+            )
+        self.context.set_tool_schemas(self.tools.schemas())
+        for warning in warnings:
+            yield ErrorEvent(warning, "mcp")
+
+    def _restore_mcp_session(self, snapshot: Any) -> Generator[AgentEvent, None, None]:
+        if self.mcp_manager is None or not self._mcp_initialized:
+            return
+        warnings = self.mcp_manager.restore_session(
+            tuple(record.as_dict() for record in snapshot.records)
+        )
         self.context.set_tool_schemas(self.tools.schemas())
         for warning in warnings:
             yield ErrorEvent(warning, "mcp")

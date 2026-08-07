@@ -121,13 +121,18 @@ stores the exact file digest in ignored `.duckduckcode/mcp.trust`; denial uses
 only the user layer. Non-interactive CLI runs deny an untrusted project layer.
 
 Discovered tools are named `mcp__<server>__<tool>` and use their MCP input
-schema with non-strict model validation. Each is retained as an `MCPTool` by
-`MCPManager` and registered directly in the shared `ToolManager`; `mcp_tools()`
-provides a read-only ordered view for future management features. Names must contain only letters,
-digits, underscores, or hyphens and be at most 64 characters. MCP tools are
-always treated as potentially side-effecting: Plan Mode blocks them, while
-other modes use the normal permission panel. “Always allow” stores an exact,
-canonical JSON argument match in project-local permission rules.
+schema with non-strict model validation. `MCPManager` retains each as an
+`MCPTool`; `mcp_tools()` provides the ordered discovery catalog for management
+code. Model context receives a stable, untrusted catalog containing only MCP
+tool names and descriptions. No remote MCP tool is initially callable: the
+model must call the read-only local `LoadTools` with exact catalog names to add
+complete schemas for the current session. Loaded schemas survive compaction and
+are reconstructed when the same session is restored. MCP calls remain
+potentially side-effecting: Plan Mode blocks them and other modes use the
+normal permission panel; `LoadTools` remains available in Plan Mode and needs
+no MCP-call approval. “Always allow” stores an exact, canonical JSON argument
+match in project-local permission rules. Search, pagination, unloading,
+Resources, and dynamic tool refresh are unsupported.
 
 Servers initialize concurrently with a 10-second per-server limit. Tool calls
 have a 60-second limit. A failed, timed-out, or disconnected session does not
@@ -136,9 +141,8 @@ responsible for protocol-level SSE resumption inside a live Streamable HTTP
 session. Sessions, HTTP clients, and stdio processes remain open until the
 Agent closes.
 
-All discovered MCP tools are currently disclosed to the model. The first MCP
-release intentionally omits progressive disclosure, resources, prompts, sampling, OAuth,
-health checks, manager-level automatic reconnect, configuration hot reload, and
+The first MCP release intentionally omits prompts, sampling, OAuth, health
+checks, manager-level automatic reconnect, configuration hot reload, and
 dynamic `tools/list_changed` refresh. Restart DuckDuckCode after changing
 configuration or server tool definitions.
 

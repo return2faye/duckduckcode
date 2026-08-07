@@ -302,6 +302,29 @@ class OpenAIClientTest(unittest.TestCase):
 
 
 class ContextManagerTest(unittest.TestCase):
+    def test_mcp_catalog_is_stable_system_context(self) -> None:
+        context = ContextManager(
+            system_prompt="system",
+            long_term_memory="memory",
+        )
+        context.set_mcp_catalog("MCP catalog")
+        context.set_skill_catalog("Skill catalog")
+        context.add_user("hello")
+
+        self.assertEqual(
+            context.model_messages(),
+            [
+                Message("system", "system"),
+                Message("system", "memory"),
+                Message("system", "MCP catalog"),
+                Message("system", "Skill catalog"),
+                Message("user", "hello"),
+            ],
+        )
+
+        context.restore([Message("user", "restored")])
+        self.assertIn(Message("system", "MCP catalog"), context.model_messages())
+
     def test_build_system_prompt_includes_identity_environment_and_mode_slot(
         self,
     ) -> None:
@@ -1472,6 +1495,11 @@ class AgentTest(unittest.TestCase):
         batches = []
 
         class CompletingOutOfOrder:
+            dirty = False
+
+            def mark_clean(self) -> None:
+                pass
+
             def schemas(self):
                 return []
 

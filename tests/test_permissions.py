@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 import stat
@@ -30,6 +31,64 @@ from duckduckcode.tools.tool import ToolCall, ToolManager, create_tool
 
 
 class PermissionCheckerTest(unittest.TestCase):
+    def test_dynamic_tool_permissions_do_not_depend_on_mcp_name_prefix(self) -> None:
+        class DynamicTool:
+            name = "external__search"
+            is_read_only = False
+            category = "external"
+
+            def permission_content(self, arguments):
+                return json.dumps(
+                    arguments,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+
+        with (
+            tempfile.TemporaryDirectory() as workspace_dir,
+            tempfile.TemporaryDirectory() as home_dir,
+        ):
+            workspace = Path(workspace_dir)
+            temporary = workspace / "tmp"
+            temporary.mkdir()
+            dynamic_name = lambda name: name.startswith("external__")
+            policy = RulePolicy.load(
+                workspace,
+                temporary,
+                {"Bash"},
+                home=Path(home_dir),
+                dynamic_tool_name=dynamic_name,
+            )
+            checker = PermissionChecker(policy=policy)
+            tool = DynamicTool()
+            call = ToolCall("one", tool.name, {"limit": 3, "query": "duck"})
+
+            self.assertEqual(checker.check(call, tool=tool).action, "ask")
+            checker.remember_allow(call, tool=tool)
+            reloaded = RulePolicy.load(
+                workspace,
+                temporary,
+                {"Bash"},
+                home=Path(home_dir),
+                dynamic_tool_name=dynamic_name,
+            )
+
+            self.assertEqual(
+                reloaded.check(
+                    ToolCall(
+                        "two",
+                        tool.name,
+                        {"query": "duck", "limit": 3},
+                    )
+                ).action,
+                "allow",
+            )
+            self.assertEqual(
+                reloaded.check(ToolCall("three", tool.name, {"query": "goose"})).action,
+                "ask",
+            )
+
     def test_mcp_arguments_are_exact_persistable_permission_content(self) -> None:
         with (
             tempfile.TemporaryDirectory() as workspace_dir,
@@ -38,11 +97,13 @@ class PermissionCheckerTest(unittest.TestCase):
             workspace = Path(workspace_dir)
             temporary = workspace / "tmp"
             temporary.mkdir()
+            dynamic_name = lambda name: name.startswith("mcp__")
             policy = RulePolicy.load(
                 workspace,
                 temporary,
                 {"Bash"},
                 home=Path(home_dir),
+                dynamic_tool_name=dynamic_name,
             )
             tool = create_tool(
                 "mcp__docs__search",
@@ -64,6 +125,7 @@ class PermissionCheckerTest(unittest.TestCase):
                 temporary,
                 {"Bash"},
                 home=Path(home_dir),
+                dynamic_tool_name=dynamic_name,
             )
 
             self.assertEqual(
@@ -169,14 +231,14 @@ class PermissionCheckerTest(unittest.TestCase):
         class FakePolicy:
             permission_mode = "ask_for_approval"
 
-            def check(self, tool_call):
+            def check(self, tool_call, *, tool=None):
                 if tool_call.call_id == "denied":
                     return PermissionDecision("deny", "explicit deny", "input")
                 if tool_call.call_id == "allowed":
                     return PermissionDecision("allow", content="input")
                 return PermissionDecision("ask", "approval required", "input")
 
-            def remember_allow(self, tool_call):
+            def remember_allow(self, tool_call, *, tool=None):
                 pass
 
             def set_permission_mode(self, mode):
@@ -265,12 +327,12 @@ class PermissionCheckerTest(unittest.TestCase):
         class AskPolicy:
             permission_mode = "full_access"
 
-            def check(self, tool_call):
+            def check(self, tool_call, *, tool=None):
                 if tool_call.call_id == "denied":
                     return PermissionDecision("deny", "explicit deny", "secret")
                 return PermissionDecision("ask", "approval required", "input")
 
-            def remember_allow(self, tool_call):
+            def remember_allow(self, tool_call, *, tool=None):
                 raise AssertionError
 
         checker = PermissionChecker(policy=AskPolicy())
@@ -593,14 +655,14 @@ class AgentPermissionTest(unittest.TestCase):
         )
 
         class FakePolicy:
-            def check(self, tool_call):
+            def check(self, tool_call, *, tool=None):
                 if tool_call.call_id == "call_2":
                     return PermissionDecision(
                         "ask", "approval required", "second input"
                     )
                 return PermissionDecision("allow", content="first input")
 
-            def remember_allow(self, tool_call):
+            def remember_allow(self, tool_call, *, tool=None):
                 remembered.append(tool_call)
 
         class FakeClient:
@@ -667,10 +729,10 @@ class AgentPermissionTest(unittest.TestCase):
         )
 
         class FakePolicy:
-            def check(self, tool_call):
+            def check(self, tool_call, *, tool=None):
                 return PermissionDecision("ask", "approval required", "git push")
 
-            def remember_allow(self, tool_call):
+            def remember_allow(self, tool_call, *, tool=None):
                 raise AssertionError
 
         class FakeClient:

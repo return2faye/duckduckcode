@@ -58,7 +58,7 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `config.py`: startup configuration loaded from environment variables
 - `core/context.py`: `Message`, system prompt, abstraction, tool schemas, and `ContextManager`
 - `core/event.py`: internal streaming and session lifecycle events
-- `core/mcp.py`: MCP configuration, transports, discovery, and tool adaptation
+- `core/mcp.py`: MCP configuration, transports, discovery, and `MCPTool` management
 - `core/subagent.py`: subagent Definition discovery and worker lifecycle
 - `eval/`: benchmark loading, isolated execution, local result storage, and judging
 - `memory/instruction.py`: project and user instruction loading
@@ -69,13 +69,16 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `providers/openai/`: OpenAI Responses API client, serializers, and SSE handling
 - `providers/deepseek/`: DeepSeek Chat Completions client, serializers, and stream handling
 - `interfaces/tui.py`: curses frontend that talks to the backend through pipes
-- `tools/tool.py`: `ToolManager`, tool schemas, and tool-call execution
+- `tools/tool.py`: the `Tool` protocol, `BuiltinTool`, `ToolManager`, schemas, and execution
 
 `ContextManager` builds the model context: system prompt first, optional abstraction
 summary, long-term-memory snapshot, and stale-session reminder next, then user,
 assistant, tool-call, and tool-result messages.
 
-`Agent` owns `ToolManager`, passes tool schemas into `ContextManager`, executes returned tool calls, appends the tool call/result messages, then asks the model again for the final answer.
+`Agent` owns `ToolManager`, which treats built-in and MCP tools as equal `Tool`
+implementations. It passes their schemas into `ContextManager`, executes returned
+tool calls, appends the tool call/result messages, then asks the model again for
+the final answer.
 
 ## MCP servers
 
@@ -118,7 +121,9 @@ stores the exact file digest in ignored `.duckduckcode/mcp.trust`; denial uses
 only the user layer. Non-interactive CLI runs deny an untrusted project layer.
 
 Discovered tools are named `mcp__<server>__<tool>` and use their MCP input
-schema with non-strict model validation. Names must contain only letters,
+schema with non-strict model validation. Each is retained as an `MCPTool` by
+`MCPManager` and registered directly in the shared `ToolManager`; `mcp_tools()`
+provides a read-only ordered view for future management features. Names must contain only letters,
 digits, underscores, or hyphens and be at most 64 characters. MCP tools are
 always treated as potentially side-effecting: Plan Mode blocks them, while
 other modes use the normal permission panel. “Always allow” stores an exact,
@@ -131,7 +136,8 @@ responsible for protocol-level SSE resumption inside a live Streamable HTTP
 session. Sessions, HTTP clients, and stdio processes remain open until the
 Agent closes.
 
-The first MCP release intentionally omits resources, prompts, sampling, OAuth,
+All discovered MCP tools are currently disclosed to the model. The first MCP
+release intentionally omits progressive disclosure, resources, prompts, sampling, OAuth,
 health checks, manager-level automatic reconnect, configuration hot reload, and
 dynamic `tools/list_changed` refresh. Restart DuckDuckCode after changing
 configuration or server tool definitions.

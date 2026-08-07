@@ -195,6 +195,7 @@ def build_agent(
             workspace,
             path_sandbox.temporary_directory,
             _PERMISSION_TOOL_NAMES,
+            dynamic_tool_name=MCPManager.accepts_tool_name,
         )
         memory_manager = MemoryManager(workspace) if enable_memory else None
         memory_snapshot = (

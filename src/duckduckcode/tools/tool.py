@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from queue import Queue
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 Validator = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -24,7 +24,33 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
-class Tool:
+class ToolResult:
+    content: str
+    is_error: bool = False
+
+    def to_model_output(self) -> str:
+        return json.dumps({"content": self.content, "isError": self.is_error})
+
+
+class Tool(Protocol):
+    name: str
+    description: str
+    params: dict[str, Any]
+    is_read_only: bool
+    is_dangerous: bool
+    is_concurrency_safe: bool
+    category: str
+    strict: bool
+
+    def schema(self) -> dict[str, Any]: ...
+
+    def execute(self, arguments: dict[str, Any]) -> ToolResult: ...
+
+    def permission_content(self, arguments: dict[str, Any]) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class BuiltinTool:
     name: str
     description: str
     params: dict[str, Any]
@@ -45,14 +71,17 @@ class Tool:
             "strict": self.strict,
         }
 
+    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        normalized = self.validator(arguments)
+        if not isinstance(normalized, dict):
+            raise TypeError("Tool validator must return a dictionary")
+        result = self.handler(**normalized)
+        if isinstance(result, ToolResult):
+            return result
+        return ToolResult(result if isinstance(result, str) else json.dumps(result))
 
-@dataclass(frozen=True)
-class ToolResult:
-    content: str
-    is_error: bool = False
-
-    def to_model_output(self) -> str:
-        return json.dumps({"content": self.content, "isError": self.is_error})
+    def permission_content(self, arguments: dict[str, Any]) -> str | None:
+        return None
 
 
 def create_tool(
@@ -67,8 +96,8 @@ def create_tool(
     is_concurrency_safe: bool = False,
     category: str = "general",
     strict: bool = True,
-) -> Tool:
-    return Tool(
+) -> BuiltinTool:
+    return BuiltinTool(
         name,
         description,
         params,
@@ -128,7 +157,7 @@ def create_load_skill_tool(handler: Callable[..., Any]) -> Tool:
         "Call this before solving when the skill catalog matches the user's intent.",
         LOAD_SKILL_PARAMS,
         handler,
-        _validate_load_skill,
+        validate_load_skill_arguments,
         is_read_only=True,
         category="search",
     )
@@ -171,40 +200,6 @@ def create_agent_tool(
         "additionalProperties": False,
     }
 
-    def validate(arguments: dict[str, Any]) -> dict[str, Any]:
-        expected = set(params["required"])
-        missing = sorted(expected - arguments.keys())
-        unsupported = sorted(arguments.keys() - expected)
-        if missing or unsupported:
-            detail = (
-                "missing: " + ", ".join(missing)
-                if missing
-                else "unsupported: " + ", ".join(unsupported)
-            )
-            raise ValueError(f"Agent failed: {detail}.")
-        for field in ("prompt", "description"):
-            if not isinstance(arguments[field], str) or not arguments[field].strip():
-                raise ValueError(f"Agent failed: '{field}' must be a non-empty string.")
-        for field in ("model", "name"):
-            value = arguments[field]
-            if value is not None and (not isinstance(value, str) or not value.strip()):
-                raise ValueError(
-                    f"Agent failed: '{field}' must be null or a non-empty string."
-                )
-        subagent_type = arguments["subagent_type"]
-        if subagent_type is not None and subagent_type not in types:
-            raise ValueError(f"Agent failed: unknown subagent_type '{subagent_type}'.")
-        for field in ("run_in_background", "isolation"):
-            if not isinstance(arguments[field], bool):
-                raise ValueError(f"Agent failed: '{field}' must be a boolean.")
-        normalized = dict(arguments)
-        if subagent_type is None:
-            normalized["run_in_background"] = True
-        for field in ("prompt", "description", "model", "name"):
-            if normalized[field] is not None:
-                normalized[field] = normalized[field].strip()
-        return normalized
-
     guidance = "".join(
         f"\n- {name}: {descriptions[name]}" for name in types if name in descriptions
     )
@@ -215,7 +210,7 @@ def create_agent_tool(
         + guidance,
         params,
         handler,
-        validate,
+        lambda arguments: validate_agent_arguments(arguments, types),
         is_read_only=True,
         category="agent",
     )
@@ -240,7 +235,7 @@ class ToolManager:
         category: str = "general",
         strict: bool = True,
     ) -> None:
-        if isinstance(name, Tool):
+        if not isinstance(name, str):
             if (
                 description is not None
                 or parameters is not None
@@ -287,13 +282,10 @@ class ToolManager:
 
         tool = self._tools[tool_call.name]
         try:
-            arguments = tool.validator(dict(tool_call.arguments))
-            if not isinstance(arguments, dict):
-                raise TypeError("Tool validator must return a dictionary")
-            result = tool.handler(**arguments)
-            if isinstance(result, ToolResult):
-                return result
-            return ToolResult(result if isinstance(result, str) else json.dumps(result))
+            result = tool.execute(dict(tool_call.arguments))
+            if not isinstance(result, ToolResult):
+                raise TypeError("Tool.execute() must return ToolResult")
+            return result
         except Exception as exc:
             return ToolResult(str(exc), is_error=True)
 
@@ -345,7 +337,52 @@ def _identity(arguments: dict[str, Any]) -> dict[str, Any]:
     return arguments
 
 
-def _validate_load_skill(arguments: dict[str, Any]) -> dict[str, Any]:
+def validate_agent_arguments(
+    arguments: dict[str, Any], definition_types: list[str] | tuple[str, ...]
+) -> dict[str, Any]:
+    expected = {
+        "prompt",
+        "description",
+        "subagent_type",
+        "model",
+        "run_in_background",
+        "name",
+        "isolation",
+    }
+    missing = sorted(expected - arguments.keys())
+    unsupported = sorted(arguments.keys() - expected)
+    if missing or unsupported:
+        detail = (
+            "missing: " + ", ".join(missing)
+            if missing
+            else "unsupported: " + ", ".join(unsupported)
+        )
+        raise ValueError(f"Agent failed: {detail}.")
+    for field in ("prompt", "description"):
+        if not isinstance(arguments[field], str) or not arguments[field].strip():
+            raise ValueError(f"Agent failed: '{field}' must be a non-empty string.")
+    for field in ("model", "name"):
+        value = arguments[field]
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(
+                f"Agent failed: '{field}' must be null or a non-empty string."
+            )
+    subagent_type = arguments["subagent_type"]
+    if subagent_type is not None and subagent_type not in definition_types:
+        raise ValueError(f"Agent failed: unknown subagent_type '{subagent_type}'.")
+    for field in ("run_in_background", "isolation"):
+        if not isinstance(arguments[field], bool):
+            raise ValueError(f"Agent failed: '{field}' must be a boolean.")
+    normalized = dict(arguments)
+    if subagent_type is None:
+        normalized["run_in_background"] = True
+    for field in ("prompt", "description", "model", "name"):
+        if normalized[field] is not None:
+            normalized[field] = normalized[field].strip()
+    return normalized
+
+
+def validate_load_skill_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     unsupported = sorted(arguments.keys() - {"name", "task"})
     if unsupported:
         raise ValueError(

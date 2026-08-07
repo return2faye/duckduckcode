@@ -386,15 +386,38 @@ class MCPToolAdapterTest(unittest.TestCase):
 
         self.assertEqual(warnings, [])
         self.assertIsNotNone(tool)
+        self.assertEqual(type(tool).__name__, "MCPTool")
+        self.assertEqual(manager.mcp_tools(), (tool,))
         self.assertFalse(tool.schema()["strict"])
         self.assertFalse(tool.is_read_only)
         self.assertFalse(tool.is_concurrency_safe)
+        self.assertEqual(
+            tool.permission_content({"query": "duck", "limit": 3}),
+            '{"limit":3,"query":"duck"}',
+        )
         call.assert_called_once_with(session, "search", {"q": "ducks"})
         payload = json.loads(actual.content)
         self.assertEqual(payload["content"][0]["text"], "found")
         self.assertEqual(payload["structuredContent"], {"count": 1})
         self.assertTrue(payload["isError"])
         self.assertTrue(actual.is_error)
+
+    def test_mcp_tools_preserve_discovery_order_in_manager_and_registry(self) -> None:
+        tools = ToolManager()
+        manager = MCPManager(Path.cwd(), {}, tools, home=Path("/nonexistent"))
+        discovered = [
+            SimpleNamespace(name="first", description="First", inputSchema={}),
+            SimpleNamespace(name="second", description="Second", inputSchema={}),
+        ]
+
+        self.assertEqual(manager.register_discovered("docs", object(), discovered), [])
+
+        mcp_tools = manager.mcp_tools()
+        self.assertEqual(
+            [tool.name for tool in mcp_tools], ["mcp__docs__first", "mcp__docs__second"]
+        )
+        self.assertIs(tools.get("mcp__docs__first"), mcp_tools[0])
+        self.assertIs(tools.get("mcp__docs__second"), mcp_tools[1])
 
     def test_skips_invalid_generated_names_and_schemas(self) -> None:
         tools = ToolManager()

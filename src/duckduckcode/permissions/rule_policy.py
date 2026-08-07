@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 import glob
@@ -12,7 +13,7 @@ from typing import Literal
 import yaml
 
 from ..tools.glob import _matches_glob
-from ..tools.tool import ToolCall
+from ..tools.tool import Tool, ToolCall
 
 PermissionAction = Literal["deny", "ask", "allow", "unspecified"]
 RuleAction = Literal["deny", "ask", "allow"]
@@ -25,7 +26,6 @@ _ACTION_BY_NAME: dict[str, RuleAction] = {
     "allow": "allow",
 }
 _PATH_TOOLS = frozenset({"ReadFile", "WriteFile", "EditFile", "Glob", "Grep"})
-_MCP_PREFIX = "mcp__"
 
 
 @dataclass(frozen=True)
@@ -54,6 +54,7 @@ class RulePolicy:
         local_file: Path,
         local_data: dict[str, list[dict[str, str]]],
         permission_mode: PermissionMode,
+        dynamic_tool_name: Callable[[str], bool],
     ) -> None:
         self.workspace = workspace.resolve()
         self.temporary_directory = temporary_directory.resolve()
@@ -61,6 +62,7 @@ class RulePolicy:
         self.local_file = local_file
         self._local_data = local_data
         self.permission_mode = permission_mode
+        self.dynamic_tool_name = dynamic_tool_name
 
     @classmethod
     def load(
@@ -70,10 +72,12 @@ class RulePolicy:
         known_tools: set[str],
         *,
         home: Path | None = None,
+        dynamic_tool_name: Callable[[str], bool] | None = None,
     ) -> RulePolicy:
         workspace = workspace.resolve()
         temporary_directory = temporary_directory.resolve()
         home = (home or Path.home()).resolve()
+        dynamic_tool_name = dynamic_tool_name or (lambda name: False)
         global_directory = _permission_directory(
             home / ".duckduckcode", home, "home directory"
         )
@@ -98,6 +102,7 @@ class RulePolicy:
                 workspace,
                 temporary_directory,
                 known_tools,
+                dynamic_tool_name,
             )
             rules.extend(source_rules)
             if local:
@@ -110,6 +115,7 @@ class RulePolicy:
             local_file,
             local_data,
             permission_mode,
+            dynamic_tool_name,
         )
 
     @staticmethod
@@ -142,8 +148,10 @@ class RulePolicy:
             )
         return mode
 
-    def check(self, tool_call: ToolCall) -> PermissionDecision:
-        content = self._content(tool_call)
+    def check(
+        self, tool_call: ToolCall, *, tool: Tool | None = None
+    ) -> PermissionDecision:
+        content = self._content(tool_call, tool)
         if content is None:
             return PermissionDecision("unspecified")
         network_access = (
@@ -205,8 +213,8 @@ class RulePolicy:
                 )
         return PermissionDecision("allow", content=display_content)
 
-    def remember_allow(self, tool_call: ToolCall) -> None:
-        content = self._content(tool_call)
+    def remember_allow(self, tool_call: ToolCall, *, tool: Tool | None = None) -> None:
+        content = self._content(tool_call, tool)
         if content is None:
             raise ValueError(
                 f"Cannot remember permission for malformed {tool_call.name} input."
@@ -284,18 +292,13 @@ class RulePolicy:
             if os.path.exists(temporary_path):
                 os.unlink(temporary_path)
 
-    def _content(self, tool_call: ToolCall) -> str | None:
-        if tool_call.name.startswith(_MCP_PREFIX):
-            try:
-                return json.dumps(
-                    tool_call.arguments,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                )
-            except (TypeError, ValueError):
-                return None
+    def _content(self, tool_call: ToolCall, tool: Tool | None = None) -> str | None:
+        if tool is not None:
+            content = tool.permission_content(dict(tool_call.arguments))
+            if content is not None:
+                return content
+        if self.dynamic_tool_name(tool_call.name):
+            return _canonical_arguments(tool_call.arguments)
         if tool_call.name == "Bash":
             command = tool_call.arguments.get("command")
             network_access = tool_call.arguments.get("network_access", False)
@@ -319,7 +322,7 @@ class RulePolicy:
             return None
 
     def _stored_pattern(self, tool_name: str, content: str) -> str:
-        if tool_name == "Bash" or tool_name.startswith(_MCP_PREFIX):
+        if tool_name not in _PATH_TOOLS:
             return glob.escape(content)
         path = Path(content)
         if path.is_relative_to(self.workspace):
@@ -337,6 +340,7 @@ def _load_file(
     workspace: Path,
     temporary_directory: Path,
     known_tools: set[str],
+    dynamic_tool_name: Callable[[str], bool],
 ) -> tuple[
     list[_Rule],
     dict[str, list[dict[str, str]]],
@@ -361,6 +365,7 @@ def _load_file(
         workspace,
         temporary_directory,
         known_tools,
+        dynamic_tool_name,
     )
 
 
@@ -416,6 +421,7 @@ def _load_tool_rules(
     workspace: Path,
     temporary_directory: Path,
     known_tools: set[str],
+    dynamic_tool_name: Callable[[str], bool],
 ) -> tuple[
     list[_Rule],
     dict[str, list[dict[str, str]]],
@@ -437,7 +443,7 @@ def _load_tool_rules(
             permission_mode = entries
             continue
         if not isinstance(tool_name, str) or (
-            tool_name not in known_tools and not tool_name.startswith(_MCP_PREFIX)
+            tool_name not in known_tools and not dynamic_tool_name(tool_name)
         ):
             raise RuntimeError(
                 f"Permission file '{path}' references unknown tool '{tool_name}'."
@@ -509,9 +515,22 @@ def _build_rule(
 
 
 def _matches(rule: _Rule, content: str) -> bool:
-    if rule.tool_name == "Bash" or rule.tool_name.startswith(_MCP_PREFIX):
+    if rule.tool_name not in _PATH_TOOLS:
         return fnmatchcase(content, rule.pattern)
     return _matches_glob(
         PurePosixPath(content).parts,
         PurePosixPath(rule.pattern).parts,
     )
+
+
+def _canonical_arguments(arguments: dict[str, object]) -> str | None:
+    try:
+        return json.dumps(
+            arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return None

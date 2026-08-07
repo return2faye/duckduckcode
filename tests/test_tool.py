@@ -17,6 +17,73 @@ def raise_error(message: str) -> None:
 
 
 class ToolTest(unittest.TestCase):
+    def test_registry_executes_any_tool_protocol_implementation(self) -> None:
+        class ExternalTool:
+            name = "external"
+            description = "External tool"
+            params = {"type": "object"}
+            is_read_only = False
+            is_dangerous = False
+            is_concurrency_safe = False
+            category = "external"
+            strict = False
+
+            def schema(self):
+                return {
+                    "type": "function",
+                    "name": self.name,
+                    "description": self.description,
+                    "parameters": self.params,
+                    "strict": self.strict,
+                }
+
+            def execute(self, arguments):
+                arguments["handled"] = True
+                return ToolResult(str(arguments))
+
+            def permission_content(self, arguments):
+                return None
+
+        manager = ToolManager()
+        tool = ExternalTool()
+
+        manager.register(tool)
+        result = manager.execute(ToolCall("call_1", "external", {"value": 1}))
+
+        self.assertIs(manager.get("external"), tool)
+        self.assertEqual(result, ToolResult("{'value': 1, 'handled': True}"))
+
+    def test_registry_rejects_invalid_protocol_execution_result(self) -> None:
+        class InvalidTool:
+            name = "invalid"
+            is_concurrency_safe = False
+
+            def schema(self):
+                return {}
+
+            def execute(self, arguments):
+                return "not a ToolResult"
+
+        manager = ToolManager()
+        manager.register(InvalidTool())
+
+        result = manager.execute(ToolCall("call_1", "invalid", {}))
+
+        self.assertTrue(result.is_error)
+        self.assertIn("must return ToolResult", result.content)
+
+    def test_factory_creates_builtin_tool(self) -> None:
+        tool = create_tool(
+            "builtin",
+            "Builtin tool",
+            {"type": "object"},
+            lambda: "ok",
+            lambda arguments: arguments,
+        )
+
+        self.assertEqual(type(tool).__name__, "BuiltinTool")
+        self.assertEqual(tool.permission_content({"value": 1}), None)
+
     def test_tool_schema_can_disable_strict_validation(self) -> None:
         tool = create_tool(
             "remote",

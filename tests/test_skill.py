@@ -233,10 +233,10 @@ class SkillTest(unittest.TestCase):
         class AskPolicy:
             permission_mode = "ask_for_approval"
 
-            def check(self, tool_call):
+            def check(self, tool_call, *, tool=None):
                 return PermissionDecision("ask", "approve", tool_call.name)
 
-            def remember_allow(self, tool_call):
+            def remember_allow(self, tool_call, *, tool=None):
                 pass
 
             def set_permission_mode(self, mode):
@@ -291,7 +291,28 @@ class SkillTest(unittest.TestCase):
             parent_context.add_user("old request")
             parent_context.add_assistant("old answer")
             parent_tools = ToolManager()
-            parent_tools.register(create_load_skill_tool(manager.load))
+            builtin = create_load_skill_tool(manager.load)
+
+            class ProtocolTool:
+                name = builtin.name
+                description = builtin.description
+                params = builtin.params
+                is_read_only = builtin.is_read_only
+                is_dangerous = builtin.is_dangerous
+                is_concurrency_safe = builtin.is_concurrency_safe
+                category = builtin.category
+                strict = builtin.strict
+
+                def schema(self):
+                    return builtin.schema()
+
+                def execute(self, arguments):
+                    return builtin.execute(arguments)
+
+                def permission_content(self, arguments):
+                    return None
+
+            parent_tools.register(ProtocolTool())
             children = []
             roots = []
 

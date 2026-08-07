@@ -542,16 +542,34 @@ class AgentIntegrationTest(unittest.TestCase):
             def close(self):
                 pass
 
-        definitions = DefinitionManager(Path.cwd())
-        definitions.refresh()
         manager = Manager()
         tools = ToolManager()
-        tools.register(create_agent_tool(["explore", "plan"], lambda **_: "unused"))
+        builtin = create_agent_tool(["explore", "plan"], lambda **_: "unused")
+
+        class ProtocolTool:
+            name = builtin.name
+            description = builtin.description
+            params = builtin.params
+            is_read_only = builtin.is_read_only
+            is_dangerous = builtin.is_dangerous
+            is_concurrency_safe = builtin.is_concurrency_safe
+            category = builtin.category
+            strict = builtin.strict
+
+            def schema(self):
+                return builtin.schema()
+
+            def execute(self, arguments):
+                return builtin.execute(arguments)
+
+            def permission_content(self, arguments):
+                return None
+
+        tools.register(ProtocolTool())
         agent = Agent(
             Client(),
             ContextManager(system_prompt="system"),
             tools,
-            definition_manager=definitions,
             subagent_manager=manager,
         )
 
@@ -611,13 +629,13 @@ class AgentIntegrationTest(unittest.TestCase):
         class Policy:
             permission_mode = "ask_for_approval"
 
-            def check(self, tool_call):
+            def check(self, tool_call, *, tool=None):
                 return PermissionDecision("ask", "approval required", tool_call.name)
 
             def set_permission_mode(self, mode):
                 self.permission_mode = mode
 
-            def remember_allow(self, tool_call):
+            def remember_allow(self, tool_call, *, tool=None):
                 raise AssertionError("must not remember subagent approval")
 
         tools = ToolManager(source=QuerySource.SUBAGENT)

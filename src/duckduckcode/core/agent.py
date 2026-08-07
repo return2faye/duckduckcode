@@ -44,6 +44,8 @@ from ..tools.tool import (
     ToolManager,
     ToolResult,
     create_agent_tool,
+    validate_agent_arguments,
+    validate_load_skill_arguments,
 )
 
 AgentResponse = PermissionChoice | PlanReviewResponse | None
@@ -682,7 +684,7 @@ class Agent:
                     decision.message,
                 )
                 if choice == "allow_always":
-                    self.permission_checker.remember_allow(tool_call)
+                    self.permission_checker.remember_allow(tool_call, tool=tool)
                     allowed.append(tool_call)
                 elif choice == "allow_once":
                     allowed.append(tool_call)
@@ -755,12 +757,10 @@ class Agent:
         if self.definition_manager is None:
             return
         definitions, warning = self.definition_manager.refresh()
-        current = self.tools.get("Agent")
-        handler = current.handler if current is not None else lambda **_: ""
         self.tools.register(
             create_agent_tool(
                 {definition.type: definition.when_to_use for definition in definitions},
-                handler,
+                lambda **_: "Agent calls are handled by the Agent runtime.",
             )
         )
         self.context.set_tool_schemas(self.tools.schemas())
@@ -776,7 +776,19 @@ class Agent:
             return ToolResult("Subagents are unavailable in this Agent.", True)
         tool = self.tools.get("Agent")
         try:
-            arguments = tool.validator(dict(tool_call.arguments)) if tool else {}
+            schema = tool.schema() if tool is not None else {}
+            values = (
+                schema.get("parameters", {})
+                .get("properties", {})
+                .get("subagent_type", {})
+                .get("enum", ())
+            )
+            definition_types = tuple(
+                value for value in values if isinstance(value, str)
+            )
+            arguments = validate_agent_arguments(
+                dict(tool_call.arguments), definition_types
+            )
         except Exception as exc:
             return ToolResult(str(exc), True)
         return (
@@ -817,9 +829,8 @@ class Agent:
     ) -> Generator[AgentEvent, AgentResponse, ToolResult]:
         if self.skill_manager is None or self._fork_agent_factory is None:
             return ToolResult("Fork Skills are unavailable in this Agent.", True)
-        tool = self.tools.get("LoadSkill")
         try:
-            arguments = tool.validator(dict(tool_call.arguments)) if tool else {}
+            arguments = validate_load_skill_arguments(dict(tool_call.arguments))
         except Exception as exc:
             return ToolResult(str(exc), True)
         skill, block, error = self.skill_manager.load_fork(

@@ -33,9 +33,13 @@ _UNSAFE_GIT_OPTIONS = (
 class PermissionPolicy(Protocol):
     permission_mode: PermissionMode
 
-    def check(self, tool_call: ToolCall) -> PermissionDecision: ...
+    def check(
+        self, tool_call: ToolCall, *, tool: Tool | None = None
+    ) -> PermissionDecision: ...
 
-    def remember_allow(self, tool_call: ToolCall) -> None: ...
+    def remember_allow(
+        self, tool_call: ToolCall, *, tool: Tool | None = None
+    ) -> None: ...
 
     def set_permission_mode(self, mode: PermissionMode) -> None: ...
 
@@ -61,7 +65,7 @@ class PermissionChecker:
             if denial is not None:
                 return PermissionDecision("deny", denial)
         if self._policy is not None:
-            decision = self._policy.check(tool_call)
+            decision = self._policy.check(tool_call, tool=tool)
         else:
             decision = PermissionDecision("unspecified")
         if decision.action == "deny":
@@ -102,10 +106,10 @@ class PermissionChecker:
             raise RuntimeError("No permission policy is configured.")
         self._policy.set_permission_mode(mode)
 
-    def remember_allow(self, tool_call: ToolCall) -> None:
+    def remember_allow(self, tool_call: ToolCall, *, tool: Tool | None = None) -> None:
         if self._policy is None:
             raise RuntimeError("No permission policy is configured.")
-        self._policy.remember_allow(tool_call)
+        self._policy.remember_allow(tool_call, tool=tool)
 
     def start_task(self) -> None:
         for rule in self._rules:

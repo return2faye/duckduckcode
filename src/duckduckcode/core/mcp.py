@@ -4,6 +4,7 @@ import asyncio
 from contextlib import AsyncExitStack
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
+from functools import partial
 from hashlib import sha256
 import json
 import os
@@ -12,7 +13,7 @@ import re
 import stat
 import tempfile
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -22,7 +23,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import DEFAULT_INHERITED_ENV_VARS, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
-from ..tools.tool import ToolManager, ToolResult, create_tool
+from ..tools.tool import ToolManager, ToolResult
 
 MAX_CONFIG_BYTES = 256 * 1024
 START_TIMEOUT_SECONDS = 10
@@ -72,6 +73,66 @@ class MCPConfiguration:
 class MCPPermissionRequest:
     content: str
     message: str
+
+
+@dataclass(frozen=True)
+class MCPTool:
+    server_name: str
+    definition: Any
+    _call: Callable[[str, dict[str, Any]], Any]
+    is_read_only: bool = False
+    is_dangerous: bool = False
+    is_concurrency_safe: bool = False
+    category: str = "mcp"
+    strict: bool = False
+
+    @property
+    def remote_name(self) -> str:
+        return self.definition.name
+
+    @property
+    def name(self) -> str:
+        return f"mcp__{self.server_name}__{self.remote_name}"
+
+    @property
+    def description(self) -> str:
+        return self.definition.description or ""
+
+    @property
+    def params(self) -> dict[str, Any]:
+        return self.definition.inputSchema
+
+    def schema(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.params,
+            "strict": self.strict,
+        }
+
+    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+        try:
+            result = self._call(self.remote_name, arguments)
+        except Exception as exc:
+            raise RuntimeError(f"MCP tool '{self.name}' failed: {exc}") from exc
+        content = json.dumps(
+            result.model_dump(mode="json", by_alias=True, exclude_none=True),
+            ensure_ascii=False,
+        )
+        return ToolResult(content, bool(result.isError))
+
+    def permission_content(self, arguments: dict[str, Any]) -> str | None:
+        try:
+            return json.dumps(
+                arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return None
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -322,6 +383,14 @@ class MCPManager:
         self._loop_error: Exception | None = None
         self._stop_event: asyncio.Event | None = None
         self._states: list[_ServerState] = []
+        self._mcp_tools: list[MCPTool] = []
+
+    @staticmethod
+    def accepts_tool_name(name: str) -> bool:
+        return name.startswith("mcp__")
+
+    def mcp_tools(self) -> tuple[MCPTool, ...]:
+        return tuple(self._mcp_tools)
 
     def permission_request(self) -> MCPPermissionRequest | None:
         if (
@@ -519,24 +588,6 @@ class MCPManager:
     ) -> list[str]:
         warnings: list[str] = []
 
-        def make_handler(
-            remote_session: object, remote_name: str, display_name: str
-        ) -> Any:
-            def handler(**arguments: Any) -> ToolResult:
-                try:
-                    result = self._call_tool(remote_session, remote_name, arguments)
-                    content = json.dumps(
-                        result.model_dump(
-                            mode="json", by_alias=True, exclude_none=True
-                        ),
-                        ensure_ascii=False,
-                    )
-                    return ToolResult(content, bool(result.isError))
-                except Exception as exc:
-                    return ToolResult(f"MCP tool '{display_name}' failed: {exc}", True)
-
-            return handler
-
         for remote in discovered:
             remote_name = getattr(remote, "name", "")
             name = f"mcp__{server_name}__{remote_name}"
@@ -558,17 +609,9 @@ class MCPManager:
                 )
                 continue
 
-            self.tools.register(
-                create_tool(
-                    name,
-                    getattr(remote, "description", None) or "",
-                    schema,
-                    make_handler(session, remote_name, name),
-                    lambda arguments: arguments,
-                    category="mcp",
-                    strict=False,
-                )
-            )
+            tool = MCPTool(server_name, remote, partial(self._call_tool, session))
+            self.tools.register(tool)
+            self._mcp_tools.append(tool)
         return warnings
 
     def _call_tool(self, session: object, name: str, arguments: dict[str, Any]) -> Any:

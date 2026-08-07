@@ -14,6 +14,8 @@ from unittest.mock import patch
 from duckduckcode.core.lsp import (
     MAX_MESSAGE_BYTES,
     LSPManager,
+    _end_position,
+    _lsp_position,
     _read_frame,
     load_lsp_configuration,
 )
@@ -187,6 +189,22 @@ class LSPConfigurationTest(unittest.TestCase):
             self.assertTrue(
                 any("start with '.'" in item for item in configuration.warnings)
             )
+
+    def test_rejects_non_string_json_object_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write(
+                home,
+                "bad:\n"
+                "  command: server\n"
+                "  extensions: {'.x': x}\n"
+                "  settings: {1: value}\n",
+            )
+
+            configuration = load_lsp_configuration({}, home=home)
+
+            self.assertEqual(configuration.servers, {})
+            self.assertIn("JSON-compatible", configuration.warnings[0])
 
 
 class LSPToolTest(unittest.TestCase):
@@ -633,6 +651,14 @@ class LSPProtocolTest(unittest.TestCase):
                 finally:
                     manager.close()
 
+    def test_only_cr_and_lf_are_lsp_line_breaks(self) -> None:
+        text = "a\u2028b"
+
+        self.assertEqual(
+            _lsp_position(text, 1, 4, "utf-16"), {"line": 0, "character": 3}
+        )
+        self.assertEqual(_end_position(text, "utf-16"), {"line": 0, "character": 3})
+
     def test_concurrent_requests_are_paired_by_id(self) -> None:
         manager = self._manager()
         self.addCleanup(manager.close)
@@ -741,7 +767,7 @@ class LSPProtocolTest(unittest.TestCase):
         hanging = self._manager(env={"LSP_FAKE_MODE": "hang"})
         self.addCleanup(hanging.close)
         with patch("duckduckcode.core.lsp.START_TIMEOUT_SECONDS", 0.05):
-            with self.assertRaisesRegex(RuntimeError, "initialize.*timed out"):
+            with self.assertRaisesRegex(RuntimeError, "startup.*timed out"):
                 hanging.execute(
                     operation="workspace_symbols",
                     server="test",
@@ -844,11 +870,11 @@ class LSPProtocolTest(unittest.TestCase):
         self.addCleanup(lambda: _terminate_process(server_pid))
 
         started = time.monotonic()
-        with patch("duckduckcode.core.lsp.CLOSE_TIMEOUT_SECONDS", 0.05):
+        with patch("duckduckcode.core.lsp.CLOSE_TIMEOUT_SECONDS", 0.1):
             manager.close()
         elapsed = time.monotonic() - started
 
-        self.assertLess(elapsed, 0.5)
+        self.assertLess(elapsed, 0.16)
         with self.assertRaises(ProcessLookupError):
             os.kill(server_pid, 0)
 
@@ -888,6 +914,70 @@ class LSPFramingTest(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "16 MiB"):
             await _read_frame(reader)
+
+    async def test_rejects_non_finite_json_numbers(self) -> None:
+        import asyncio
+
+        for constant in (b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(constant=constant):
+                reader = asyncio.StreamReader()
+                body = b'{"jsonrpc":"2.0","result":' + constant + b"}"
+                reader.feed_data(
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+                )
+                reader.feed_eof()
+
+                with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
+                    await _read_frame(reader)
+
+    async def test_startup_deadline_covers_process_creation(self) -> None:
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "home"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            path = home / ".duckduckcode" / "lsp.yaml"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "test:\n  command: blocked\n  extensions: {'.py': python}\n",
+                encoding="utf-8",
+            )
+            manager = LSPManager(workspace, {}, home=home)
+
+            async def blocked(*args, **kwargs):
+                await asyncio.Event().wait()
+
+            with (
+                patch("duckduckcode.core.lsp.asyncio.create_subprocess_exec", blocked),
+                patch("duckduckcode.core.lsp.START_TIMEOUT_SECONDS", 0.02),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "startup.*timed out"):
+                    await asyncio.wait_for(manager._start_connection("test"), 0.2)
+
+    async def test_request_deadline_covers_document_sync(self) -> None:
+        import asyncio
+
+        class BlockedConnection:
+            position_encoding = "utf-16"
+
+            async def sync_document(self, path, language_id, content):
+                await asyncio.Event().wait()
+
+        manager = object.__new__(LSPManager)
+
+        async def connection(name):
+            return BlockedConnection()
+
+        manager._connection = connection
+        document = (Path("sample.py"), "x", "python")
+        arguments = {"operation": "document_symbols"}
+        with patch("duckduckcode.core.lsp.REQUEST_TIMEOUT_SECONDS", 0.02):
+            with self.assertRaisesRegex(RuntimeError, "request timed out"):
+                await asyncio.wait_for(
+                    manager._execute_async("test", arguments, document), 0.2
+                )
 
 
 def _terminate_process(pid: int) -> None:

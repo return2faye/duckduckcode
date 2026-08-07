@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -196,9 +197,7 @@ def _parse_server(value: object, environment: Mapping[str, str]) -> LSPServer:
         ("initialization_options", initialization_options),
         ("settings", settings),
     ):
-        try:
-            json.dumps(item, allow_nan=False)
-        except (TypeError, ValueError):
+        if not _is_json_value(item):
             raise ValueError(f"{name} must be JSON-compatible") from None
     return LSPServer(
         command,
@@ -208,6 +207,20 @@ def _parse_server(value: object, environment: Mapping[str, str]) -> LSPServer:
         initialization_options,
         settings,
     )
+
+
+def _is_json_value(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _is_json_value(item) for key, item in value.items()
+        )
+    return False
 
 
 def _expand_env(value: object, environment: Mapping[str, str]) -> dict[str, str]:
@@ -355,39 +368,45 @@ class LSPManager:
         document: tuple[Path, str, str] | None,
     ) -> Any:
         connection = await self._connection(server_name)
-        operation = str(arguments["operation"])
-        if operation == "workspace_symbols":
-            return await connection.request(
-                "workspace/symbol", {"query": arguments["query"]}
-            )
-        assert document is not None
-        path, content, language_id = document
-        uri = await connection.sync_document(path, language_id, content)
-        if operation == "document_symbols":
-            return await connection.request(
-                "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
-            )
-        position = _lsp_position(
-            content,
-            int(arguments["line"]),
-            int(arguments["column"]),
-            connection.position_encoding,
-        )
-        params: dict[str, Any] = {
-            "textDocument": {"uri": uri},
-            "position": position,
-        }
-        methods = {
-            "definition": "textDocument/definition",
-            "references": "textDocument/references",
-            "hover": "textDocument/hover",
-        }
-        if operation == "references":
-            include = arguments["include_declaration"]
-            params["context"] = {
-                "includeDeclaration": True if include is None else include
-            }
-        return await connection.request(methods[operation], params)
+        try:
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                operation = str(arguments["operation"])
+                if operation == "workspace_symbols":
+                    return await connection.request(
+                        "workspace/symbol", {"query": arguments["query"]}
+                    )
+                assert document is not None
+                path, content, language_id = document
+                uri = await connection.sync_document(path, language_id, content)
+                if operation == "document_symbols":
+                    return await connection.request(
+                        "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
+                    )
+                position = _lsp_position(
+                    content,
+                    int(arguments["line"]),
+                    int(arguments["column"]),
+                    connection.position_encoding,
+                )
+                params: dict[str, Any] = {
+                    "textDocument": {"uri": uri},
+                    "position": position,
+                }
+                methods = {
+                    "definition": "textDocument/definition",
+                    "references": "textDocument/references",
+                    "hover": "textDocument/hover",
+                }
+                if operation == "references":
+                    include = arguments["include_declaration"]
+                    params["context"] = {
+                        "includeDeclaration": True if include is None else include
+                    }
+                return await connection.request(methods[operation], params)
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"LSP request timed out after {REQUEST_TIMEOUT_SECONDS:g} seconds"
+            ) from exc
 
     async def _connection(self, name: str) -> _Connection:
         if name in self._failures:
@@ -407,7 +426,6 @@ class LSPManager:
             raise RuntimeError(message) from exc
         finally:
             self._starting.pop(name, None)
-        self._connections[name] = connection
         return connection
 
     async def _start_connection(self, name: str) -> _Connection:
@@ -423,7 +441,14 @@ class LSPManager:
             self.workspace,
             {**inherited, **dict(server.env)},
         )
-        await connection.start()
+        try:
+            async with asyncio.timeout(START_TIMEOUT_SECONDS):
+                await connection.start()
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"LSP startup timed out after {START_TIMEOUT_SECONDS:g} seconds"
+            ) from exc
+        self._connections[name] = connection
         return connection
 
     @staticmethod
@@ -547,7 +572,6 @@ class _Connection:
                     },
                     "initializationOptions": self.server.initialization_options,
                 },
-                timeout=START_TIMEOUT_SECONDS,
             )
             if not isinstance(result, dict) or not isinstance(
                 result.get("capabilities", {}), dict
@@ -562,13 +586,14 @@ class _Connection:
             await self.notify(
                 "workspace/didChangeConfiguration", {"settings": self.server.settings}
             )
+        except asyncio.CancelledError:
+            await self._force_close(asyncio.get_running_loop().time())
+            raise
         except BaseException:
             await self._force_close()
             raise
 
-    async def request(
-        self, method: str, params: Any, *, timeout: float | None = None
-    ) -> Any:
+    async def request(self, method: str, params: Any) -> Any:
         if self._fatal is not None:
             raise RuntimeError(self._fatal)
         request_id = self._next_id
@@ -584,17 +609,10 @@ class _Connection:
                     "params": params,
                 }
             )
-            try:
-                return await asyncio.wait_for(
-                    future,
-                    timeout=(REQUEST_TIMEOUT_SECONDS if timeout is None else timeout),
-                )
-            except TimeoutError as exc:
-                await self.notify("$/cancelRequest", {"id": request_id})
-                seconds = REQUEST_TIMEOUT_SECONDS if timeout is None else timeout
-                raise RuntimeError(
-                    f"LSP request '{method}' timed out after {seconds:g} seconds"
-                ) from exc
+            return await future
+        except asyncio.CancelledError:
+            asyncio.create_task(self.notify("$/cancelRequest", {"id": request_id}))
+            raise
         finally:
             self._pending.pop(request_id, None)
 
@@ -758,30 +776,34 @@ class _Connection:
         self._closing = True
         if self.process is None:
             return
+        deadline = asyncio.get_running_loop().time() + CLOSE_TIMEOUT_SECONDS
         try:
-            for uri, document in self._documents.items():
-                if document.opened:
-                    await self.notify(
-                        "textDocument/didClose", {"textDocument": {"uri": uri}}
-                    )
-            if self.process.returncode is None:
-                try:
-                    await self.request("shutdown", None, timeout=CLOSE_TIMEOUT_SECONDS)
+            async with asyncio.timeout_at(deadline):
+                for uri, document in self._documents.items():
+                    if document.opened:
+                        await self.notify(
+                            "textDocument/didClose", {"textDocument": {"uri": uri}}
+                        )
+                if self.process.returncode is None:
+                    await self.request("shutdown", None)
                     await self.notify("exit", None)
-                    await asyncio.wait_for(
-                        self.process.wait(), timeout=CLOSE_TIMEOUT_SECONDS
-                    )
-                except Exception:
-                    pass
+                    await self.process.wait()
+        except Exception:
+            pass
         finally:
-            await self._force_close()
+            await self._force_close(deadline)
 
-    async def _force_close(self) -> None:
+    async def _force_close(self, deadline: float | None = None) -> None:
         process = self.process
         if process is not None and process.returncode is None:
             process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=CLOSE_TIMEOUT_SECONDS)
+                timeout = (
+                    CLOSE_TIMEOUT_SECONDS
+                    if deadline is None
+                    else max(0, deadline - asyncio.get_running_loop().time())
+                )
+                await asyncio.wait_for(process.wait(), timeout=timeout)
             except TimeoutError:
                 process.kill()
                 await process.wait()
@@ -824,8 +846,8 @@ async def _read_frame(reader: asyncio.StreamReader) -> dict[str, Any]:
         raise RuntimeError("LSP message exceeds the 16 MiB limit")
     data = await reader.readexactly(content_length)
     try:
-        message = json.loads(data)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        message = json.loads(data, parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, ValueError) as exc:
         raise RuntimeError("LSP response contains invalid JSON") from exc
     if not isinstance(message, dict):
         raise RuntimeError("LSP response must be a JSON object")
@@ -843,6 +865,10 @@ def _setting(settings: Any, section: Any) -> Any:
     return value
 
 
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant {value}")
+
+
 def _sync_options(capabilities: Mapping[str, Any]) -> tuple[bool, int]:
     value = capabilities.get("textDocumentSync", 0)
     if isinstance(value, int) and not isinstance(value, bool):
@@ -856,10 +882,7 @@ def _sync_options(capabilities: Mapping[str, Any]) -> tuple[bool, int]:
 
 
 def _lines(text: str) -> list[str]:
-    lines = text.splitlines()
-    if not lines or text.endswith(("\n", "\r")):
-        lines.append("")
-    return lines
+    return re.split(r"\r\n|\r|\n", text)
 
 
 def _line_prefix(text: str, line: int, column: int) -> str:

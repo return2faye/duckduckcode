@@ -1,0 +1,51 @@
+name: CI
+
+"on":
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run python -m unittest discover -s tests
+      - run: uv run black --check src tests
+      - run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+      - run: uv build --out-dir "$RUNNER_TEMP/dist"
+      - name: Check wheel contents
+        run: |
+          uv run python - <<'PY'
+          import email
+          import os
+          import zipfile
+          from pathlib import Path
+
+          wheel = next((Path(os.environ["RUNNER_TEMP"]) / "dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+              for path in (
+                  "duckduckcode/core/mcp.py",
+                  "duckduckcode/core/lsp.py",
+                  "duckduckcode/core/worktree.py",
+              ):
+                  assert path in names, f"missing from wheel: {path}"
+              metadata_path = next(name for name in names if name.endswith(".dist-info/METADATA"))
+              metadata = email.message_from_bytes(archive.read(metadata_path))
+              requirements = metadata.get_all("Requires-Dist", [])
+              assert any(
+                  requirement.startswith("mcp")
+                  and ">=1.28" in requirement
+                  and "<2" in requirement
+                  for requirement in requirements
+              ), f"missing MCP dependency range: {requirements}"
+          PY

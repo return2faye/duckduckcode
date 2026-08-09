@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 import stat
 import tempfile
+from types import SimpleNamespace
 from typing import cast
 
 from duckduckcode.core.agent import Agent
@@ -28,6 +29,7 @@ from duckduckcode.permissions import (
     check_bash_blacklist,
 )
 from duckduckcode.tools.tool import ToolCall, ToolManager, create_tool
+from duckduckcode.tools.worktree import create_remove_worktree_tool
 
 
 class PermissionCheckerTest(unittest.TestCase):
@@ -602,6 +604,65 @@ class PathSandboxTest(unittest.TestCase):
             assert denial is not None
             self.assertIn("outside the allowed directories", denial)
 
+    def test_isolated_worktree_rejects_git_metadata_writes(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            tempfile.TemporaryDirectory() as temporary_parent,
+        ):
+            sandbox = PathSandbox(
+                Path(workspace),
+                temporary_parent=Path(temporary_parent),
+                protect_git_metadata=True,
+            )
+            self.addCleanup(sandbox.close)
+
+            for name in ("WriteFile", "EditFile"):
+                denial = sandbox(ToolCall(name, name, {"path": ".git/config"}))
+                self.assertIn("Git metadata", denial or "")
+            self.assertIsNone(sandbox(ToolCall("read", "ReadFile", {"path": ".git"})))
+
+    def test_exact_opted_in_symlink_target_is_read_only(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            tempfile.TemporaryDirectory() as parent,
+            tempfile.TemporaryDirectory() as temporary_parent,
+        ):
+            target = Path(parent) / ".env"
+            target.write_text("TOKEN=secret", encoding="utf-8")
+            Path(workspace, ".env").symlink_to(target)
+            sandbox = PathSandbox(
+                Path(workspace),
+                temporary_parent=Path(temporary_parent),
+                read_only_paths=(target,),
+            )
+            self.addCleanup(sandbox.close)
+
+            self.assertIsNone(sandbox(ToolCall("read", "ReadFile", {"path": ".env"})))
+            self.assertIn(
+                "read-only",
+                sandbox(ToolCall("write", "WriteFile", {"path": ".env"})) or "",
+            )
+
+    def test_injected_copy_inside_workspace_is_read_only(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as workspace,
+            tempfile.TemporaryDirectory() as temporary_parent,
+        ):
+            target = Path(workspace) / ".env"
+            target.write_text("TOKEN=secret", encoding="utf-8")
+            sandbox = PathSandbox(
+                Path(workspace),
+                temporary_parent=Path(temporary_parent),
+                read_only_paths=(target,),
+            )
+            self.addCleanup(sandbox.close)
+
+            self.assertIsNone(sandbox(ToolCall("read", "ReadFile", {"path": ".env"})))
+            self.assertIn(
+                "read-only",
+                sandbox(ToolCall("write", "EditFile", {"path": ".env"})) or "",
+            )
+
     def test_agent_cleans_private_temporary_directory_after_each_task(self) -> None:
         with (
             tempfile.TemporaryDirectory() as workspace,
@@ -646,6 +707,111 @@ class PathSandboxTest(unittest.TestCase):
 
 
 class AgentPermissionTest(unittest.TestCase):
+    def test_dirty_worktree_removal_requires_one_time_confirmation(self) -> None:
+        removed = []
+
+        class Worktrees:
+            def preflight_remove(self, worktree_id):
+                return {
+                    "id": worktree_id,
+                    "base_commit": "a" * 40,
+                    "dirty": True,
+                    "files": ["source.py"],
+                    "parent_changed": False,
+                }
+
+            def remove(self, worktree_id):
+                removed.append(worktree_id)
+                return {"patch": "diff"}
+
+        manager = Worktrees()
+        tools = ToolManager()
+        tools.register(create_remove_worktree_tool(manager.remove))
+        agent = Agent(
+            cast(Client, object()),
+            tools=tools,
+            subagent_manager=SimpleNamespace(
+                worktree_manager=manager,
+                workspace_busy=False,
+            ),
+        )
+        call = ToolCall("remove", "RemoveWorktree", {"id": "safe-id"})
+        execution = agent._execute_tools([call])
+
+        request = next(execution)
+        self.assertIsInstance(request, PermissionRequestEvent)
+        self.assertIn("uncommitted changes", request.message)
+        with self.assertRaises(StopIteration) as stopped:
+            execution.send("allow_always")
+
+        self.assertEqual(removed, ["safe-id"])
+        self.assertEqual(stopped.exception.value[0][1].content, '{"patch": "diff"}')
+
+    def test_dirty_worktree_removal_denial_keeps_worktree(self) -> None:
+        class Worktrees:
+            def preflight_remove(self, worktree_id):
+                return {"id": worktree_id, "dirty": True, "files": ["x"]}
+
+            def remove(self, worktree_id):
+                raise AssertionError("must not remove")
+
+        manager = Worktrees()
+        tools = ToolManager()
+        tools.register(create_remove_worktree_tool(manager.remove))
+        agent = Agent(
+            cast(Client, object()),
+            tools=tools,
+            subagent_manager=SimpleNamespace(
+                worktree_manager=manager,
+                workspace_busy=False,
+            ),
+        )
+        execution = agent._execute_tools(
+            [ToolCall("remove", "RemoveWorktree", {"id": "safe-id"})]
+        )
+
+        next(execution)
+        with self.assertRaises(StopIteration) as stopped:
+            execution.send("deny")
+
+        result = stopped.exception.value[0][1]
+        self.assertTrue(result.is_error)
+        self.assertIn("cancelled", result.content)
+
+    def test_plan_mode_denies_worktree_removal_without_prompting(self) -> None:
+        class Worktrees:
+            def preflight_remove(self, worktree_id):
+                raise AssertionError("plan mode must reject before preflight")
+
+            def remove(self, worktree_id):
+                raise AssertionError("must not remove")
+
+        manager = Worktrees()
+        tools = ToolManager()
+        tools.register(create_remove_worktree_tool(manager.remove))
+        context = ContextManager()
+        context.set_mode("plan")
+        agent = Agent(
+            cast(Client, object()),
+            context=context,
+            tools=tools,
+            plan_file=Path("/tmp/plan.md"),
+            subagent_manager=SimpleNamespace(
+                worktree_manager=manager,
+                workspace_busy=False,
+            ),
+        )
+        execution = agent._execute_tools(
+            [ToolCall("remove", "RemoveWorktree", {"id": "safe-id"})]
+        )
+
+        with self.assertRaises(StopIteration) as stopped:
+            next(execution)
+
+        result = stopped.exception.value[0][1]
+        self.assertTrue(result.is_error)
+        self.assertIn("Plan Mode", result.content)
+
     def test_asks_before_executing_any_tools_and_resumes_with_user_choice(
         self,
     ) -> None:

@@ -61,6 +61,7 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `core/mcp.py`: MCP configuration, transports, discovery, and `MCPTool` management
 - `core/lsp.py`: LSP configuration, stdio JSON-RPC, document sync, and navigation
 - `core/subagent.py`: subagent Definition discovery and worker lifecycle
+- `core/worktree.py`: persistent isolated worktrees, recovery, dependency injection, and patches
 - `eval/`: benchmark loading, isolated execution, local result storage, and judging
 - `memory/instruction.py`: project and user instruction loading
 - `memory/long_term.py`: validated user/project long-term memory storage and injection
@@ -71,6 +72,7 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `providers/deepseek/`: DeepSeek Chat Completions client, serializers, and stream handling
 - `interfaces/tui.py`: curses frontend that talks to the backend through pipes
 - `tools/tool.py`: the `Tool` protocol, `BuiltinTool`, `ToolManager`, schemas, and execution
+- `tools/worktree.py`: persistent worktree listing and protected removal tools
 
 `ContextManager` builds the model context: system prompt first, optional abstraction
 summary, long-term-memory snapshot, and stale-session reminder next, then user,
@@ -352,13 +354,68 @@ created it. Switching sessions does not cancel work or leak results; deleting a
 session terminates its workers. Tasks are process-local and are not restored
 after restart.
 
-With `isolation=true`, the worker runs in a temporary workspace snapshot. `.git`
-and runtime session, memory, plan, and report data are excluded; edits never copy
-back, and the snapshot is removed after completion, failure, timeout, or
-shutdown. A non-isolated fork may edit the shared workspace. The first release
-therefore permits only one such fork at a time: it holds a whole-task write lease
-that temporarily makes parent `WriteFile`, `EditFile`, and `Bash` calls return
-busy. Read-only Definition tasks and isolated forks can still run concurrently.
+An isolated Definition runs read-only in a temporary workspace snapshot. An
+isolated writable fork instead requires a clean Git repository and starts from
+the current `HEAD` in a persistent worktree. Its stable ID is derived from the
+chat session ID and slug, and its branch is
+`worktree-<slug>-<session-hash-8>`. Explicit `name` values must be at most 48 ASCII
+characters and match `[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*`; a missing name is
+derived safely from `description`. The worktree lives under
+`~/.duckduckcode/worktrees/<repo-hash>/<worktree-id>` and is reused only by the
+same chat and slug. Its original base commit is never reset when the parent
+advances. Workers receive the worktree as their own tool root without changing
+the main process cwd, and cannot modify their `.git` pointer or shared Git
+metadata. Git commands disable Manager hooks and interactive terminal prompts;
+the main repository's effective hooks path is set explicitly as worktree-local
+configuration for tools that inspect it.
+
+Ignored local files are absent by default. Users may opt Git-ignored,
+non-symlink dependencies into isolated worktrees with
+`~/.duckduckcode/worktree.yaml`:
+
+```yaml
+copy:
+  - .env
+  - .duckduckcode/permissions.local.yaml
+
+symlinks:
+  - .venv
+  - node_modules
+```
+
+`copy` accepts regular files; `symlinks` accepts regular files or directories
+and creates absolute links. Paths are relative to the workspace, limited and
+validated, and both forms are read-only to dedicated write tools and the OS
+sandbox. A persisted SHA-256 manifest lets the Manager refresh safe copies and
+remove obsolete injections without overwriting externally changed destinations.
+Missing, tracked, non-ignored, source-symlink, unsafe, or conflicting entries
+are skipped with a warning. Both lists default empty because they may expose
+secrets or large local dependencies to a subagent.
+
+After the worker stops, DuckDuckCode captures a binary full-index patch plus the
+fixed base commit and changed-file list, reports whether the parent workspace
+changed, and marks failed or timed-out output as partial. The patch is cumulative
+from the first base across reused tasks. It never applies or merges the patch.
+The main Agent must inspect the base, `parent_changed`, `partial`, and patch
+before reproducing changes. Large patches use existing on-disk tool-result
+storage.
+
+Worktree state and the injection manifest are atomically persisted in ignored
+`.duckduckcode/worktrees.json`. Startup validates only Manager-owned state and
+Git registration, changes a crashed active session back to idle, and preserves
+its checkout and modifications. `/new`, session deletion, task failure, timeout,
+and process shutdown do not remove persistent worktrees. `ListWorktrees` reports
+their exact IDs, activity, dirtiness, base, and parent status. `RemoveWorktree`
+is the only normal removal path: it refuses active worktrees, captures a final
+patch, then removes the checkout and branch. A dirty removal always asks once,
+even in full-access mode, and an “always allow” response applies only to that
+request. Corrupt or externally changed ownership metadata is warned about and
+never automatically pruned or reset.
+
+A non-isolated fork may edit the shared workspace. Only one such fork runs at a
+time: it holds a whole-task write lease that temporarily makes parent
+`WriteFile`, `EditFile`, and `Bash` calls return busy. Read-only Definition tasks
+and isolated worktree forks can still run concurrently.
 
 `OpenAIClient.stream()` uses Responses API SSE streaming. `DeepSeekClient.stream()`
 uses Chat Completions, converts the shared message/tool representation, assembles

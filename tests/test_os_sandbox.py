@@ -50,6 +50,25 @@ class OSSandboxTest(unittest.TestCase):
             str(sandbox.temporary_directory / "cache" / "uv"),
         )
 
+    def test_darwin_denies_writes_to_injected_dependencies(self) -> None:
+        dependency = self.workspace / ".env"
+        with (
+            patch(
+                "duckduckcode.tools.os_sandbox.platform.system", return_value="Darwin"
+            ),
+            patch("duckduckcode.tools.os_sandbox.Path.is_file", return_value=True),
+        ):
+            sandbox = OSSandbox(
+                self.workspace,
+                self.private_temp,
+                lambda: True,
+                (dependency,),
+            )
+            command = sandbox.prepare("true", False)
+
+        self.assertIn('param "READONLY0"', command.argv[2])
+        self.assertIn(f"READONLY0={dependency.resolve()}", command.argv)
+
     def test_linux_uses_bubblewrap_namespaces_and_seccomp(self) -> None:
         with (
             patch(
@@ -81,6 +100,33 @@ class OSSandboxTest(unittest.TestCase):
         finally:
             offline.close()
             online.close()
+
+    def test_linux_read_only_binds_injected_dependencies(self) -> None:
+        dependency = self.workspace / "node_modules"
+        with (
+            patch(
+                "duckduckcode.tools.os_sandbox.platform.system", return_value="Linux"
+            ),
+            patch(
+                "duckduckcode.tools.os_sandbox.platform.machine", return_value="x86_64"
+            ),
+            patch("duckduckcode.tools.os_sandbox.Path.is_file", return_value=True),
+        ):
+            sandbox = OSSandbox(
+                self.workspace,
+                self.private_temp,
+                lambda: True,
+                (dependency,),
+            )
+            command = sandbox.prepare("true", False)
+
+        try:
+            resolved = str(dependency.resolve())
+            index = command.argv.index(resolved)
+            self.assertEqual(command.argv[index - 1], "--ro-bind-try")
+            self.assertEqual(command.argv[index + 1], resolved)
+        finally:
+            command.close()
 
     def test_rejects_unknown_seccomp_architecture(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "not supported"):

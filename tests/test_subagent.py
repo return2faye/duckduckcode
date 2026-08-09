@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+import subprocess
 import tempfile
 import time
 import unittest
@@ -22,6 +23,7 @@ from duckduckcode.permissions import PermissionChecker, PermissionDecision
 from duckduckcode.core.subagent import (
     DefinitionManager,
     SubagentManager,
+    load_worktree_configuration,
     _worker_request,
 )
 from duckduckcode.tools.tool import (
@@ -155,6 +157,37 @@ class AgentToolTest(unittest.TestCase):
         self.assertFalse(result.is_error)
         self.assertTrue(captured[-1]["run_in_background"])
 
+    def test_validator_enforces_safe_worktree_slugs(self) -> None:
+        tool = create_agent_tool(["explore"], lambda **arguments: arguments)
+        manager = ToolManager()
+        manager.register(tool)
+        base = {
+            "prompt": "do it",
+            "description": "work",
+            "subagent_type": None,
+            "model": None,
+            "run_in_background": True,
+            "name": "Fix.Parser_2-a",
+            "isolation": True,
+        }
+
+        self.assertFalse(manager.execute(ToolCall("ok", "Agent", base)).is_error)
+        for name in (
+            ".hidden",
+            "trailing-",
+            "two--parts",
+            "mixed._parts",
+            "../escape",
+            "-option",
+            "中文",
+            "x" * 49,
+        ):
+            with self.subTest(name=name):
+                arguments = dict(base, name=name)
+                self.assertTrue(
+                    manager.execute(ToolCall(name, "Agent", arguments)).is_error
+                )
+
     def test_subagent_source_hard_rejects_recursive_agent_execution(self) -> None:
         manager = ToolManager(source=QuerySource.SUBAGENT)
         manager.register(create_agent_tool(["explore"], lambda **_: "ran"))
@@ -180,6 +213,66 @@ class AgentToolTest(unittest.TestCase):
         )
 
 
+class WorktreeConfigurationTest(unittest.TestCase):
+    def _write(self, home: Path, content: str) -> Path:
+        path = home / ".duckduckcode" / "worktree.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
+    def test_loads_safe_relative_symlink_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self._write(
+                home,
+                "symlinks:\n  - .env\n  - .duckduckcode/permissions.local.yaml\n",
+            )
+
+            configuration = load_worktree_configuration(home=home)
+
+            self.assertEqual(
+                configuration.symlinks,
+                (".env", ".duckduckcode/permissions.local.yaml"),
+            )
+            self.assertEqual(configuration.warnings, ())
+
+    def test_invalid_config_is_skipped_safely(self) -> None:
+        cases = (
+            ("duplicate", "symlinks: []\nsymlinks: []\n", "duplicate"),
+            ("unknown", "other: []\n", "unknown"),
+            ("absolute", "symlinks: [/tmp/secret]\n", "relative"),
+            ("parent", "symlinks: [../secret]\n", "relative"),
+            ("empty-segment", "symlinks: [a//b]\n", "relative"),
+            ("dot-segment", "symlinks: [a/./b]\n", "relative"),
+            ("backslash", "symlinks: ['a\\\\b']\n", "backslash"),
+            ("many", "symlinks:\n" + "  - x\n" * 65, "64"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, content, expected in cases:
+                with self.subTest(name=name):
+                    home = root / name
+                    self._write(home, content)
+                    configuration = load_worktree_configuration(home=home)
+                    self.assertEqual(configuration.symlinks, ())
+                    self.assertIn(expected, configuration.warnings[0])
+
+    def test_rejects_symlink_and_oversized_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = self._write(root / "target", "symlinks: []\n")
+            linked = root / "linked" / ".duckduckcode" / "worktree.yaml"
+            linked.parent.mkdir(parents=True)
+            linked.symlink_to(target)
+            large = self._write(root / "large", "x" * (256 * 1024 + 1))
+
+            linked_config = load_worktree_configuration(home=root / "linked")
+            large_config = load_worktree_configuration(home=root / "large")
+
+            self.assertIn("symbolic", linked_config.warnings[0])
+            self.assertIn("256 KiB", large_config.warnings[0])
+
+
 class SubagentManagerTest(unittest.TestCase):
     def _script(self, directory: Path, source: str) -> list[str]:
         path = directory / "worker.py"
@@ -198,6 +291,40 @@ class SubagentManagerTest(unittest.TestCase):
         }
         arguments.update(overrides)
         return arguments
+
+    def _git(self, workspace: Path, *arguments: str, input: str | None = None):
+        return subprocess.run(
+            ["git", "-C", str(workspace), *arguments],
+            input=input,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+
+    def _repository(self, root: Path) -> Path:
+        workspace = root / "repository"
+        workspace.mkdir()
+        self._git(workspace, "init", "-q")
+        self._git(workspace, "config", "user.name", "Test")
+        self._git(workspace, "config", "user.email", "test@example.com")
+        workspace.joinpath(".gitignore").write_text(
+            ".env\n.duckduckcode/permissions.local.yaml\n", encoding="utf-8"
+        )
+        workspace.joinpath("source.txt").write_text("original\n", encoding="utf-8")
+        workspace.joinpath("deleted.txt").write_text("delete me\n", encoding="utf-8")
+        self._git(workspace, "add", ".gitignore", "source.txt", "deleted.txt")
+        self._git(workspace, "commit", "-qm", "initial")
+        return workspace
+
+    def _finish_background(self, manager: SubagentManager, stream, session="session-a"):
+        list(stream)
+        deadline = time.monotonic() + 5
+        while manager.running_count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(manager.running_count, 0)
+        events, messages = manager.drain(session)
+        self.assertEqual(len(messages), 1)
+        return events, json.loads(messages[0].splitlines()[-1])
 
     def test_foreground_forwards_nested_events_and_returns_final_result(self) -> None:
         with tempfile.TemporaryDirectory() as wd:
@@ -323,6 +450,304 @@ class SubagentManagerTest(unittest.TestCase):
             self.assertEqual(workspace.joinpath("source.txt").read_text(), "original")
             self.assertFalse(snapshot.exists())
 
+    def test_isolated_fork_returns_patch_and_retains_worktree_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._repository(root)
+            workspace.joinpath(".env").write_text("TOKEN=secret\n", encoding="utf-8")
+            workspace.joinpath("ignored-dir").mkdir()
+            workspace.joinpath("linked-secret").symlink_to(".env")
+            with workspace.joinpath(".gitignore").open("a", encoding="utf-8") as stream:
+                stream.write("ignored-dir/\nlinked-secret\n")
+            self._git(workspace, "add", ".gitignore")
+            self._git(workspace, "commit", "-qm", "ignore local files")
+            home = root / "home"
+            config = home / ".duckduckcode" / "worktree.yaml"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                "symlinks:\n"
+                "  - .env\n"
+                "  - missing.local\n"
+                "  - source.txt\n"
+                "  - ignored-dir\n"
+                "  - linked-secret\n",
+                encoding="utf-8",
+            )
+            command = self._script(
+                root,
+                "import json, pathlib, sys\n"
+                "request = json.loads(sys.stdin.readline())\n"
+                "assert request['worktree'] is True\n"
+                "assert {pathlib.Path(path).name for path in request['worktree_read_files']} == {'.env', 'ignored-dir'}\n"
+                "cwd = pathlib.Path.cwd()\n"
+                "assert cwd.joinpath('.env').is_symlink()\n"
+                "assert cwd.joinpath('.env').read_text() == 'TOKEN=secret\\n'\n"
+                "cwd.joinpath('source.txt').write_text('changed\\n')\n"
+                "cwd.joinpath('new.txt').write_text('new\\n')\n"
+                "cwd.joinpath('deleted.txt').unlink()\n"
+                "cwd.joinpath('binary.bin').write_bytes(bytes(range(256)) * 4)\n"
+                "cwd.joinpath('new-link').symlink_to('source.txt')\n"
+                "print(json.dumps({'type':'worker_result','status':'completed','result':str(cwd)}), flush=True)\n",
+            )
+            manager = SubagentManager(workspace, worker_command=command, home=home)
+            self.addCleanup(manager.close)
+
+            stream = manager.run(
+                "outer",
+                self._arguments(
+                    subagent_type=None,
+                    run_in_background=True,
+                    isolation=True,
+                    name="Fix.Parser_2-a",
+                ),
+                session_key="session-a",
+                context=ContextManager(system_prompt="system"),
+                permission_mode="full_access",
+            )
+            events, payload = self._finish_background(manager, stream)
+
+            changes = payload["changes"]
+            worktree_path = Path(payload["result"])
+            self.assertEqual(payload["worktree_id"], changes["worktree_id"])
+            self.assertTrue(changes["branch"].startswith("worktree-Fix.Parser_2-a-"))
+            self.assertEqual(len(changes["branch"].rsplit("-", 1)[1]), 8)
+            self.assertFalse(changes["partial"])
+            self.assertFalse(changes["parent_changed"])
+            self.assertIn("diff --git a/source.txt b/source.txt", changes["patch"])
+            self.assertIn("diff --git a/new.txt b/new.txt", changes["patch"])
+            self.assertIn("GIT binary patch", changes["patch"])
+            self._git(workspace, "apply", "--check", "-", input=changes["patch"])
+            self.assertEqual(
+                {item["path"] for item in changes["files"]},
+                {"binary.bin", "deleted.txt", "new-link", "new.txt", "source.txt"},
+            )
+            self.assertTrue(
+                any("missing.local" in item for item in payload["warnings"])
+            )
+            self.assertTrue(any("tracked" in item for item in payload["warnings"]))
+            self.assertTrue(any("symlink" in item for item in payload["warnings"]))
+            self.assertEqual(workspace.joinpath("source.txt").read_text(), "original\n")
+            self.assertEqual(workspace.joinpath(".env").read_text(), "TOKEN=secret\n")
+            self.assertTrue(worktree_path.exists())
+            self.assertIn(
+                changes["branch"], self._git(workspace, "branch", "--list").stdout
+            )
+            self.assertTrue(any(event.status == "completed" for event in events))
+
+    def test_isolated_fork_requires_clean_git_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._repository(root)
+            workspace.joinpath("untracked.txt").write_text("dirty", encoding="utf-8")
+            manager = SubagentManager(
+                workspace,
+                worker_command=self._script(root, "raise AssertionError('not run')\n"),
+                home=root / "home",
+            )
+            self.addCleanup(manager.close)
+
+            stream = manager.run(
+                "outer",
+                self._arguments(
+                    subagent_type=None, run_in_background=True, isolation=True
+                ),
+                session_key="session-a",
+                context=ContextManager(system_prompt="system"),
+                permission_mode="full_access",
+            )
+            with self.assertRaises(StopIteration) as stopped:
+                next(stream)
+
+            self.assertTrue(stopped.exception.value.is_error)
+            self.assertIn("clean", stopped.exception.value.content.lower())
+            self.assertEqual(manager.running_count, 0)
+
+    def test_timed_out_fork_returns_partial_patch_and_retains_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._repository(root)
+            command = self._script(
+                root,
+                "import json, pathlib, sys, time\n"
+                "json.loads(sys.stdin.readline())\n"
+                "pathlib.Path('source.txt').write_text('partial\\n')\n"
+                "time.sleep(10)\n",
+            )
+            manager = SubagentManager(
+                workspace, worker_command=command, timeout=0.05, home=root / "home"
+            )
+            self.addCleanup(manager.close)
+
+            _, payload = self._finish_background(
+                manager,
+                manager.run(
+                    "outer",
+                    self._arguments(
+                        subagent_type=None,
+                        run_in_background=True,
+                        isolation=True,
+                    ),
+                    session_key="session-a",
+                    context=ContextManager(system_prompt="system"),
+                    permission_mode="full_access",
+                ),
+            )
+
+            self.assertTrue(payload["changes"]["partial"])
+            self.assertIn("partial", payload["changes"]["patch"])
+            self.assertEqual(
+                self._git(workspace, "worktree", "list", "--porcelain").stdout.count(
+                    "worktree "
+                ),
+                2,
+            )
+            self.assertIn(
+                payload["changes"]["branch"],
+                self._git(workspace, "branch", "--list").stdout,
+            )
+
+    def test_parent_change_is_reported_without_overwriting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._repository(root)
+            command = self._script(
+                root,
+                "import json, pathlib, sys, time\n"
+                "json.loads(sys.stdin.readline())\n"
+                "pathlib.Path('source.txt').write_text('child\\n')\n"
+                "time.sleep(.1)\n"
+                "print(json.dumps({'type':'worker_result','status':'completed','result':'done'}), flush=True)\n",
+            )
+            manager = SubagentManager(workspace, worker_command=command, home=root)
+            self.addCleanup(manager.close)
+            stream = manager.run(
+                "outer",
+                self._arguments(
+                    subagent_type=None, run_in_background=True, isolation=True
+                ),
+                session_key="session-a",
+                context=ContextManager(system_prompt="system"),
+                permission_mode="full_access",
+            )
+            list(stream)
+            workspace.joinpath("source.txt").write_text("parent\n", encoding="utf-8")
+            _, payload = self._finish_background(manager, iter(()))
+
+            self.assertTrue(payload["changes"]["parent_changed"])
+            self.assertEqual(workspace.joinpath("source.txt").read_text(), "parent\n")
+
+    def test_invalid_worker_output_returns_partial_patch_and_retains_worktree(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._repository(root)
+            command = self._script(
+                root,
+                "import json, pathlib, sys\n"
+                "json.loads(sys.stdin.readline())\n"
+                "pathlib.Path('source.txt').write_text('partial\\n')\n"
+                "print('not-json', flush=True)\n",
+            )
+            manager = SubagentManager(workspace, worker_command=command, home=root)
+            self.addCleanup(manager.close)
+
+            _, payload = self._finish_background(
+                manager,
+                manager.run(
+                    "outer",
+                    self._arguments(
+                        subagent_type=None,
+                        run_in_background=True,
+                        isolation=True,
+                    ),
+                    session_key="session-a",
+                    context=ContextManager(system_prompt="system"),
+                    permission_mode="full_access",
+                ),
+            )
+
+            self.assertTrue(payload["changes"]["partial"])
+            self.assertIn("partial", payload["changes"]["patch"])
+            self.assertEqual(
+                self._git(workspace, "worktree", "list", "--porcelain").stdout.count(
+                    "worktree "
+                ),
+                2,
+            )
+
+    def test_worker_start_failure_retains_created_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._repository(root)
+            manager = SubagentManager(
+                workspace,
+                worker_command=[str(root / "missing-worker")],
+                home=root,
+            )
+            self.addCleanup(manager.close)
+
+            stream = manager.run(
+                "outer",
+                self._arguments(
+                    subagent_type=None,
+                    run_in_background=True,
+                    isolation=True,
+                ),
+                session_key="session-a",
+                context=ContextManager(system_prompt="system"),
+                permission_mode="full_access",
+            )
+            with self.assertRaises(StopIteration) as stopped:
+                next(stream)
+
+            self.assertTrue(stopped.exception.value.is_error)
+            self.assertEqual(
+                self._git(workspace, "worktree", "list", "--porcelain").stdout.count(
+                    "worktree "
+                ),
+                2,
+            )
+            self.assertIn("worktree-", self._git(workspace, "branch", "--list").stdout)
+
+    def test_session_termination_retains_worktree_without_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._repository(root)
+            command = self._script(
+                root,
+                "import json, pathlib, sys, time\n"
+                "json.loads(sys.stdin.readline())\n"
+                "pathlib.Path('source.txt').write_text('partial\\n')\n"
+                "time.sleep(10)\n",
+            )
+            manager = SubagentManager(workspace, worker_command=command, home=root)
+            self.addCleanup(manager.close)
+            stream = manager.run(
+                "outer",
+                self._arguments(
+                    subagent_type=None, run_in_background=True, isolation=True
+                ),
+                session_key="deleted",
+                context=ContextManager(system_prompt="system"),
+                permission_mode="full_access",
+            )
+            list(stream)
+
+            manager.terminate_session("deleted")
+            deadline = time.monotonic() + 5
+            while manager.running_count and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(manager.drain("deleted"), ([], []))
+            self.assertEqual(
+                self._git(workspace, "worktree", "list", "--porcelain").stdout.count(
+                    "worktree "
+                ),
+                2,
+            )
+            self.assertIn("worktree-", self._git(workspace, "branch", "--list").stdout)
+
     def test_nonisolated_fork_holds_single_writer_lease(self) -> None:
         with tempfile.TemporaryDirectory() as wd:
             workspace = Path(wd)
@@ -363,6 +788,52 @@ class SubagentManagerTest(unittest.TestCase):
             self.assertTrue(result.is_error)
             self.assertIn("write lease", result.content)
             self.assertTrue(manager.workspace_busy)
+
+    def test_isolated_forks_run_concurrently_without_writer_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = self._repository(root)
+            command = self._script(
+                root,
+                "import json, sys, time\n"
+                "json.loads(sys.stdin.readline())\n"
+                "time.sleep(10)\n",
+            )
+            manager = SubagentManager(workspace, worker_command=command, home=root)
+            for name in ("one", "two"):
+                list(
+                    manager.run(
+                        name,
+                        self._arguments(
+                            subagent_type=None,
+                            run_in_background=True,
+                            isolation=True,
+                            name=name,
+                        ),
+                        session_key="session-a",
+                        context=ContextManager(system_prompt="system"),
+                        permission_mode="full_access",
+                    )
+                )
+
+            self.assertEqual(manager.running_count, 2)
+            self.assertFalse(manager.workspace_busy)
+            self.assertEqual(
+                self._git(workspace, "worktree", "list", "--porcelain").stdout.count(
+                    "worktree "
+                ),
+                3,
+            )
+
+            manager.close()
+
+            self.assertEqual(
+                self._git(workspace, "worktree", "list", "--porcelain").stdout.count(
+                    "worktree "
+                ),
+                3,
+            )
+            self.assertIn("worktree-", self._git(workspace, "branch", "--list").stdout)
 
     def test_timeout_releases_lease_and_delivers_structured_failure(self) -> None:
         with tempfile.TemporaryDirectory() as wd:
@@ -497,6 +968,30 @@ class SubagentManagerTest(unittest.TestCase):
 
 
 class AgentIntegrationTest(unittest.TestCase):
+    def test_large_background_result_uses_context_externalization(self) -> None:
+        class Manager:
+            workspace_busy = False
+
+            def drain(self, session_key):
+                return [], ["Untrusted subagent output\n" + "x" * (81 * 1024)]
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            context = ContextManager(
+                system_prompt="system", tool_result_directory=Path(directory)
+            )
+            agent = Agent(object(), context, subagent_manager=Manager())
+
+            self.assertEqual(list(agent._drain_subagents()), [])
+
+            message = context.messages()[-1]
+            self.assertEqual(message.role, "user")
+            self.assertIn("Tool result stored on disk", message.content)
+            stored = next(Path(directory).rglob("*.txt"))
+            self.assertIn("Untrusted subagent output", stored.read_text())
+
     def test_agent_tool_routes_through_subagent_manager(self) -> None:
         class Client:
             def __init__(self):

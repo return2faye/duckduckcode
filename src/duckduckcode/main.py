@@ -37,7 +37,9 @@ from .tools import (
     create_glob_tool,
     create_grep_tool,
     create_lsp_tool,
+    create_list_worktrees_tool,
     create_read_file_tool,
+    create_remove_worktree_tool,
     create_write_file_tool,
 )
 from .tools.os_sandbox import OSSandbox
@@ -59,6 +61,8 @@ _PERMISSION_TOOL_NAMES = {
     "LoadSkill",
     "Agent",
     "LSP",
+    "ListWorktrees",
+    "RemoveWorktree",
 }
 
 
@@ -127,10 +131,16 @@ def build_agent(
     allowed_tools: set[str] | None = None,
     query_source: QuerySource = QuerySource.USER,
     force_os_sandbox: bool = False,
+    protect_git_metadata: bool = False,
+    read_only_paths: tuple[Path, ...] = (),
     model_role: str = "agent",
     model_override: str | None = None,
 ) -> Agent:
-    path_sandbox = PathSandbox(workspace)
+    path_sandbox = PathSandbox(
+        workspace,
+        protect_git_metadata=protect_git_metadata,
+        read_only_paths=read_only_paths,
+    )
     try:
         settings = getattr(config, model_role)
         model = model_override or settings.model
@@ -140,6 +150,7 @@ def build_agent(
             path_sandbox.temporary_directory,
             lambda: force_os_sandbox
             or (policy is not None and policy.permission_mode != "full_access"),
+            read_only_paths,
         )
         tools = ToolManager(source=query_source)
         mcp_manager = (
@@ -202,6 +213,16 @@ def build_agent(
                 definitions=definition_manager,
                 parent_model=config.subagent.model,
             )
+            if enabled("ListWorktrees"):
+                tools.register(
+                    create_list_worktrees_tool(subagent_manager.worktree_manager.list)
+                )
+            if enabled("RemoveWorktree"):
+                tools.register(
+                    create_remove_worktree_tool(
+                        subagent_manager.worktree_manager.remove
+                    )
+                )
         if lsp_manager is not None and lsp_manager.server_names and enabled("LSP"):
             tools.register(create_lsp_tool(lsp_manager))
         policy = RulePolicy.load(
@@ -327,6 +348,12 @@ def run_subagent_worker(config: Config) -> None:
             allowed_tools=allowed,
             query_source=QuerySource.SUBAGENT,
             force_os_sandbox=bool(request.get("isolation", False)),
+            protect_git_metadata=bool(request.get("worktree", False)),
+            read_only_paths=tuple(
+                Path(value).resolve()
+                for value in request.get("worktree_read_files", ())
+                if isinstance(value, str)
+            ),
             model_role="subagent",
             model_override=(str(request["model"]) if request.get("model") else None),
         )

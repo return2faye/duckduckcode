@@ -53,6 +53,18 @@ class MainTest(unittest.TestCase):
         )
         lsp_home_patch.start()
         self.addCleanup(lsp_home_patch.stop)
+        worktree_home_patch = patch(
+            "duckduckcode.core.subagent.Path.home",
+            return_value=Path(self.home.name),
+        )
+        worktree_home_patch.start()
+        self.addCleanup(worktree_home_patch.stop)
+        worktree_manager_home_patch = patch(
+            "duckduckcode.core.worktree.Path.home",
+            return_value=Path(self.home.name),
+        )
+        worktree_manager_home_patch.start()
+        self.addCleanup(worktree_manager_home_patch.stop)
         worker_patch = patch("duckduckcode.memory.long_term.MemoryManager.spawn_worker")
         self.worker = worker_patch.start()
         self.addCleanup(worker_patch.stop)
@@ -76,6 +88,8 @@ class MainTest(unittest.TestCase):
                     "ExitPlanMode",
                     "LoadSkill",
                     "Agent",
+                    "ListWorktrees",
+                    "RemoveWorktree",
                 ],
             )
             self.assertIsNotNone(agent.session_manager)

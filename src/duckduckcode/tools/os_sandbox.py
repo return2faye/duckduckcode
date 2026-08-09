@@ -100,10 +100,12 @@ class OSSandbox:
         workspace: Path,
         temporary_directory: Path,
         enabled: Callable[[], bool],
+        read_only_paths: tuple[Path, ...] = (),
     ) -> None:
         self.workspace = workspace.resolve()
         self.temporary_directory = temporary_directory.resolve()
         self.enabled = enabled
+        self.read_only_paths = tuple(path.resolve() for path in read_only_paths)
         self.system = platform.system().lower()
 
     def prepare(self, command: str, network_access: bool) -> SandboxedCommand | None:
@@ -119,25 +121,37 @@ class OSSandbox:
         executable = Path("/usr/bin/sandbox-exec")
         if not executable.is_file():
             raise RuntimeError("Seatbelt requires /usr/bin/sandbox-exec.")
-        profile = _SEATBELT + ("" if network_access else _NETWORK_DENY)
-        return SandboxedCommand(
+        read_only = "".join(
+            f'(deny file-write* (literal (param "READONLY{index}")) '
+            f'(subpath (param "READONLY{index}")))\n'
+            for index in range(len(self.read_only_paths))
+        )
+        profile = _SEATBELT + read_only + ("" if network_access else _NETWORK_DENY)
+        argv = [
+            str(executable),
+            "-p",
+            profile,
+            "-D",
+            f"WORKSPACE={self.workspace}",
+            "-D",
+            f"TEMP={self.temporary_directory}",
+            "-D",
+            f"GIT={self.workspace / '.git'}",
+            "-D",
+            f"DUCKDUCKCODE={self.workspace / '.duckduckcode'}",
+        ]
+        for index, path in enumerate(self.read_only_paths):
+            argv.extend(["-D", f"READONLY{index}={path}"])
+        argv.extend(
             [
-                str(executable),
-                "-p",
-                profile,
-                "-D",
-                f"WORKSPACE={self.workspace}",
-                "-D",
-                f"TEMP={self.temporary_directory}",
-                "-D",
-                f"GIT={self.workspace / '.git'}",
-                "-D",
-                f"DUCKDUCKCODE={self.workspace / '.duckduckcode'}",
                 "--",
                 "/bin/sh",
                 "-c",
                 command,
-            ],
+            ]
+        )
+        return SandboxedCommand(
+            argv,
             environment=_sandbox_environment(self.temporary_directory),
         )
 
@@ -183,6 +197,12 @@ class OSSandbox:
                 "--ro-bind-try",
                 str(self.workspace / ".duckduckcode"),
                 str(self.workspace / ".duckduckcode"),
+            ]
+        )
+        for path in self.read_only_paths:
+            argv.extend(["--ro-bind-try", str(path), str(path)])
+        argv.extend(
+            [
                 "--proc",
                 "/proc",
                 "--dev",

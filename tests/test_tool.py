@@ -10,6 +10,10 @@ from duckduckcode.tools.tool import (
     create_exit_plan_mode_tool,
     create_tool,
 )
+from duckduckcode.tools.worktree import (
+    create_list_worktrees_tool,
+    create_remove_worktree_tool,
+)
 
 
 def raise_error(message: str) -> None:
@@ -17,6 +21,19 @@ def raise_error(message: str) -> None:
 
 
 class ToolTest(unittest.TestCase):
+    def test_worktree_tools_are_regular_builtin_tools(self) -> None:
+        removed = []
+        listing = create_list_worktrees_tool(lambda: ({"id": "one"},))
+        remove = create_remove_worktree_tool(
+            lambda worktree_id: removed.append(worktree_id) or {"patch": "diff"}
+        )
+
+        self.assertTrue(listing.is_read_only)
+        self.assertEqual(listing.execute({}).content, '[{"id": "one"}]')
+        self.assertFalse(remove.is_read_only)
+        self.assertEqual(remove.execute({"id": "one"}).content, '{"patch": "diff"}')
+        self.assertEqual(removed, ["one"])
+
     def test_unregister_returns_exact_tool_and_preserves_remaining_order(self) -> None:
         tools = ToolManager()
         first = create_tool("first", "first", {}, lambda: "first", lambda value: value)

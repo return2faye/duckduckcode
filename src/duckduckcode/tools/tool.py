@@ -6,9 +6,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from queue import Queue
+import re
 from typing import Any, Callable, Protocol
 
 Validator = Callable[[dict[str, Any]], dict[str, Any]]
+SUBAGENT_SLUG_RE = re.compile(r"^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
+MAX_SUBAGENT_SLUG_LENGTH = 48
 
 
 class QuerySource(str, Enum):
@@ -185,8 +188,21 @@ def create_agent_tool(
             },
             "model": {"type": ["string", "null"]},
             "run_in_background": {"type": "boolean"},
-            "name": {"type": ["string", "null"]},
-            "isolation": {"type": "boolean"},
+            "name": {
+                "type": ["string", "null"],
+                "description": (
+                    "Optional ASCII slug up to 48 characters; separators '.', '_', "
+                    "and '-' must appear singly between letters or digits."
+                ),
+            },
+            "isolation": {
+                "type": "boolean",
+                "description": (
+                    "For a writable fork, use a persistent Git worktree and return "
+                    "its cumulative patch without applying it. Definitions use a "
+                    "read-only snapshot."
+                ),
+            },
         },
         "required": [
             "prompt",
@@ -394,6 +410,14 @@ def validate_agent_arguments(
     for field in ("prompt", "description", "model", "name"):
         if normalized[field] is not None:
             normalized[field] = normalized[field].strip()
+    name = normalized["name"]
+    if name is not None and (
+        len(name) > MAX_SUBAGENT_SLUG_LENGTH or SUBAGENT_SLUG_RE.fullmatch(name) is None
+    ):
+        raise ValueError(
+            "Agent failed: 'name' must be an ASCII slug up to 48 characters with "
+            "single '.', '_', or '-' separators between letters or digits."
+        )
     return normalized
 
 

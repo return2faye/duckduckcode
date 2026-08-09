@@ -16,6 +16,7 @@ __pycache__/
 /.duckduckcode/eval-report.html
 /.duckduckcode/eval-reports/
 /.duckduckcode/sessions/
+/.duckduckcode/worktrees.json
 /docs/
 dist/
 *.egg-info/

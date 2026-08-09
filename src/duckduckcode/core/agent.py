@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from copy import deepcopy
+import json
 from pathlib import Path
 from typing import Any, Callable, Literal
 from uuid import uuid4
@@ -647,6 +648,48 @@ class Agent:
             if tool_call.name == "ExitPlanMode":
                 completed.append((tool_call, (yield from self._review_plan())))
                 continue
+            if (
+                tool_call.name == "RemoveWorktree"
+                and self.subagent_manager is not None
+                and self.context.mode != "plan"
+            ):
+                try:
+                    preflight = self.subagent_manager.worktree_manager.preflight_remove(
+                        str(tool_call.arguments.get("id", ""))
+                    )
+                except Exception as exc:
+                    completed.append((tool_call, ToolResult(str(exc), True)))
+                    continue
+                if preflight["dirty"]:
+                    if self.query_source == QuerySource.SUBAGENT:
+                        completed.append(
+                            (
+                                tool_call,
+                                ToolResult(
+                                    "Permission denied: subagents cannot remove dirty "
+                                    "worktrees.",
+                                    True,
+                                ),
+                            )
+                        )
+                        continue
+                    choice = yield PermissionRequestEvent(
+                        tool_call.call_id,
+                        tool_call.name,
+                        json.dumps(preflight, ensure_ascii=False),
+                        "This worktree has uncommitted changes. Delete it after "
+                        "capturing a final patch?",
+                    )
+                    if choice in {"allow_once", "allow_always"}:
+                        allowed.append(tool_call)
+                    else:
+                        completed.append(
+                            (
+                                tool_call,
+                                ToolResult("Worktree removal cancelled by user.", True),
+                            )
+                        )
+                    continue
             get_tool = getattr(self.tools, "get", None)
             tool = get_tool(tool_call.name) if callable(get_tool) else None
             if (
@@ -780,6 +823,10 @@ class Agent:
         self.context.set_tool_schemas(self.tools.schemas())
         if warning:
             yield ErrorEvent(warning, "subagent_definition")
+        if self.subagent_manager is not None:
+            worktree_warning = self.subagent_manager.startup_warning()
+            if worktree_warning:
+                yield ErrorEvent(worktree_warning, "worktree")
 
     def _run_subagent(
         self, tool_call: ToolCall
@@ -822,7 +869,11 @@ class Agent:
         for event in events:
             yield event
         for message in messages:
-            self._add_user(message, visible=False)
+            synthetic_call = ToolCall(uuid4().hex, "Agent", {})
+            _, compacted = self.context.compact_tool_results(
+                [(synthetic_call, ToolResult(message))]
+            )[0]
+            self._add_user(compacted.content, visible=False)
 
     def detach_subagent(self) -> bool:
         return (

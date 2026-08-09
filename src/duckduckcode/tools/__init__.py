@@ -5,6 +5,7 @@ from .grep import create_grep_tool
 from .lsp import create_lsp_tool
 from .read_file import create_read_file_tool
 from .write_file import create_write_file_tool
+from .worktree import create_list_worktrees_tool, create_remove_worktree_tool
 
 __all__ = [
     "create_bash_tool",
@@ -14,4 +15,6 @@ __all__ = [
     "create_lsp_tool",
     "create_read_file_tool",
     "create_write_file_tool",
+    "create_list_worktrees_tool",
+    "create_remove_worktree_tool",
 ]

@@ -32,6 +32,7 @@ EXPECTED_MODULES = {
     "core/lsp.py",
     "core/skill.py",
     "core/subagent.py",
+    "core/worktree.py",
     "interfaces/__init__.py",
     "interfaces/backend.py",
     "interfaces/tui.py",
@@ -54,10 +55,13 @@ EXPECTED_MODULES = {
     "tools/glob.py",
     "tools/grep.py",
     "tools/lsp.py",
+    "tools/bash.py",
+    "tools/os_sandbox.py",
     "tools/os_sandbox.py",
     "tools/read_file.py",
     "tools/tool.py",
     "tools/write_file.py",
+    "tools/worktree.py",
 }
 
 LEGACY_MODULES = {

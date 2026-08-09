@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 from queue import Empty, Queue
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -18,7 +20,17 @@ from uuid import uuid4
 from .context import ContextManager
 from .event import AgentEvent, SubagentEvent, ToolCallEvent, ToolResultEvent, UsageEvent
 from .skill import NAME_RE, SkillError, _split_frontmatter, _validate_entry
-from ..tools.tool import ToolCall, ToolResult
+from .worktree import (
+    GIT_TIMEOUT_SECONDS,
+    WorktreeManager,
+    WorktreeSession,
+    load_worktree_configuration,
+)
+from ..tools.tool import (
+    MAX_SUBAGENT_SLUG_LENGTH,
+    ToolCall,
+    ToolResult,
+)
 
 DEFINITION_TOOLS = {"ReadFile", "Glob", "Grep"}
 MAX_SUBAGENT_TASKS = 4
@@ -164,6 +176,7 @@ class _Task:
     lease: bool
     process: subprocess.Popen[str]
     snapshot: Path | None
+    worktree: WorktreeSession | None
     events: Queue[AgentEvent | None] = field(default_factory=Queue)
     usage: int = 0
     result: ToolResult | None = None
@@ -184,6 +197,8 @@ class SubagentManager:
         max_tasks: int = MAX_SUBAGENT_TASKS,
         timeout: float = SUBAGENT_TIMEOUT_SECONDS,
         parent_model: str | None = None,
+        home: str | Path | None = None,
+        worktree_manager: WorktreeManager | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.definitions = definitions or DefinitionManager(self.workspace)
@@ -198,6 +213,9 @@ class SubagentManager:
         self.max_tasks = max_tasks
         self.timeout = timeout
         self.parent_model = parent_model
+        self.worktree_manager = worktree_manager or WorktreeManager(
+            self.workspace, home=home
+        )
         self._tasks: dict[str, _Task] = {}
         self._inbox: dict[str, list[tuple[list[AgentEvent], str]]] = {}
         self._discarded_sessions: set[str] = set()
@@ -205,6 +223,7 @@ class SubagentManager:
         self._foreground: _Task | None = None
         self._lock = threading.RLock()
         self._closed = False
+        self._worktree_warnings_reported = False
 
     @property
     def running_count(self) -> int:
@@ -215,6 +234,15 @@ class SubagentManager:
     def workspace_busy(self) -> bool:
         with self._lock:
             return self._lease_task is not None
+
+    def startup_warning(self) -> str | None:
+        with self._lock:
+            if self._worktree_warnings_reported or not self.worktree_manager.warnings:
+                return None
+            self._worktree_warnings_reported = True
+            return "Worktree warnings:\n" + "\n".join(
+                f"- {warning}" for warning in self.worktree_manager.warnings
+            )
 
     def run(
         self,
@@ -257,10 +285,18 @@ class SubagentManager:
                 arguments.get("name") or _task_name(str(arguments["description"]))
             )
             snapshot = None
+            worktree = None
             process = None
             try:
-                snapshot = self._snapshot() if arguments["isolation"] else None
-                working_directory = snapshot or self.workspace
+                if is_fork and arguments["isolation"]:
+                    worktree = self.worktree_manager.enter(session_key, name, task_id)
+                elif arguments["isolation"]:
+                    snapshot = self._snapshot()
+                working_directory = (
+                    self.worktree_manager.workspace_path(worktree)
+                    if worktree is not None
+                    else snapshot or self.workspace
+                )
                 request = _worker_request(
                     arguments,
                     context,
@@ -269,6 +305,15 @@ class SubagentManager:
                     working_directory,
                 )
                 request["model"] = arguments["model"] or self.parent_model
+                request["worktree"] = worktree is not None
+                request["worktree_read_files"] = (
+                    [
+                        str(path)
+                        for path in self.worktree_manager.read_only_paths(worktree)
+                    ]
+                    if worktree
+                    else []
+                )
                 if lease:
                     self._lease_task = task_id
                 process_started = time.monotonic()
@@ -281,6 +326,7 @@ class SubagentManager:
                     text=True,
                     bufsize=1,
                     start_new_session=os.name != "nt",
+                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
                 )
                 assert process.stdin is not None
                 process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
@@ -294,6 +340,11 @@ class SubagentManager:
                     self._lease_task = None
                 if snapshot is not None:
                     shutil.rmtree(snapshot, ignore_errors=True)
+                if worktree is not None:
+                    left = self.worktree_manager.leave(worktree, partial=True)
+                    warnings = left["warnings"]
+                    if warnings:
+                        exc = RuntimeError(f"{exc}; {'; '.join(warnings)}")
                 return ToolResult(f"Agent failed to start subagent: {exc}", True)
             task = _Task(
                 task_id,
@@ -304,6 +355,7 @@ class SubagentManager:
                 lease,
                 process,
                 snapshot,
+                worktree,
             )
             self._tasks[task_id] = task
             if not task.background:
@@ -407,14 +459,16 @@ class SubagentManager:
                 task.process.kill()
         for task in tasks:
             if task.thread is not None:
-                task.thread.join(timeout=2)
+                task.thread.join(timeout=GIT_TIMEOUT_SECONDS + 5)
         with self._lock:
             for task in tasks:
                 if task.snapshot is not None:
                     shutil.rmtree(task.snapshot, ignore_errors=True)
             self._tasks.clear()
+            self._inbox.clear()
             self._lease_task = None
             self._foreground = None
+        self.worktree_manager.close()
 
     def _snapshot(self) -> Path:
         path = Path(tempfile.mkdtemp(prefix="duckduckcode-subagent-"))
@@ -493,6 +547,21 @@ class SubagentManager:
             normalized = "failed"
             result = "worker completed without a final response"
         task.status = normalized  # type: ignore[assignment]
+        if task.worktree is not None:
+            delivered = self.worktree_manager.leave(
+                task.worktree, partial=normalized != "completed"
+            )
+            if any(
+                str(warning).startswith("Could not collect worktree diff")
+                for warning in delivered["warnings"]
+            ):
+                normalized = "failed"
+                task.status = normalized
+            result = json.dumps(
+                {"result": result, **delivered},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         task.result = ToolResult(result, normalized != "completed")
         status_event = SubagentEvent(task.id, task.name, normalized, task.background)
         with self._lock:
@@ -501,7 +570,11 @@ class SubagentManager:
                 self._lease_task = None
             if self._foreground is task:
                 self._foreground = None
-            if task.background and task.session_key not in self._discarded_sessions:
+            if (
+                task.background
+                and not self._closed
+                and task.session_key not in self._discarded_sessions
+            ):
                 events: list[AgentEvent] = []
                 if task.usage:
                     events.append(UsageEvent(task.usage))
@@ -521,8 +594,8 @@ class SubagentManager:
 
 
 def _task_name(description: str) -> str:
-    cleaned = "-".join(description.lower().split())
-    return (cleaned[:40].strip("-") or "subagent") + "-" + uuid4().hex[:6]
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "-", description).strip("-")
+    return cleaned[:MAX_SUBAGENT_SLUG_LENGTH].rstrip("-") or "subagent"
 
 
 def _worker_request(
@@ -611,4 +684,14 @@ def _terminate(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=1)
     except (ProcessLookupError, subprocess.TimeoutExpired):
         if process.poll() is None:
-            process.kill()
+            try:
+                if os.name != "nt":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass

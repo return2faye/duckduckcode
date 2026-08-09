@@ -11,8 +11,17 @@ _SKILL_READ_TOOLS = frozenset({"ReadFile", "Glob", "Grep"})
 
 
 class PathSandbox:
-    def __init__(self, workspace: Path, temporary_parent: Path | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        temporary_parent: Path | None = None,
+        *,
+        protect_git_metadata: bool = False,
+        read_only_paths: tuple[Path, ...] = (),
+    ) -> None:
         self.workspace = workspace.resolve()
+        self.protect_git_metadata = protect_git_metadata
+        self._read_only_paths = tuple(path.resolve() for path in read_only_paths)
         parent = (temporary_parent or Path(tempfile.gettempdir())).resolve()
         self._temporary = tempfile.TemporaryDirectory(
             prefix="duckduckcode-", dir=parent
@@ -60,12 +69,28 @@ class PathSandbox:
                 "could not be resolved safely."
             )
 
+        git_metadata = self.workspace / ".git"
+        read_only = any(
+            resolved == root or resolved.is_relative_to(root)
+            for root in self._read_only_paths
+        )
+        if tool_call.name in {"WriteFile", "EditFile"} and read_only:
+            return "Permission denied: injected worktree dependencies are read-only."
+        if (
+            self.protect_git_metadata
+            and tool_call.name in {"WriteFile", "EditFile"}
+            and (resolved == git_metadata or resolved.is_relative_to(git_metadata))
+        ):
+            return "Permission denied: isolated subagents cannot modify Git metadata."
+
         roots = (
             self.current_allowed_directories()
             if tool_call.name in _SKILL_READ_TOOLS
             else self.allowed_directories
         )
-        if any(resolved.is_relative_to(root) for root in roots):
+        if any(resolved.is_relative_to(root) for root in roots) or (
+            tool_call.name in _SKILL_READ_TOOLS and read_only
+        ):
             return None
         return (
             f"Permission denied: {tool_call.name} path '{candidate}' resolves "

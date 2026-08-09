@@ -53,6 +53,7 @@ from ..tools.tool import (
 AgentResponse = PermissionChoice | PlanReviewResponse | None
 COMPACTION_MAX_ATTEMPTS = 3
 MAX_CONTEXT_LENGTH_RECOVERIES = 1
+MAX_IDENTICAL_TOOL_FAILURES = 2
 
 
 class Agent:
@@ -108,6 +109,7 @@ class Agent:
         )
         self._startup_checked = False
         self._compaction_circuit_open = False
+        self._tool_failures: dict[tuple[str, str], int] = {}
 
     def enter_plan_mode(self, plan_file: str | Path | None = None) -> None:
         if plan_file is not None:
@@ -207,6 +209,7 @@ class Agent:
     def stream(
         self, user_message: str, selected_skills: list[str] | tuple[str, ...] = ()
     ) -> Generator[AgentEvent, AgentResponse, None]:
+        self._tool_failures.clear()
         self.permission_checker.start_task()
         try:
             yield from self._stream(user_message, selected_skills)
@@ -645,6 +648,10 @@ class Agent:
         allowed: list[ToolCall] = []
         completed: list[tuple[ToolCall, ToolResult]] = []
         for tool_call in tool_calls:
+            guard_result = self._tool_loop_guard_result(tool_call)
+            if guard_result is not None:
+                completed.append((tool_call, guard_result))
+                continue
             if tool_call.name == "ExitPlanMode":
                 completed.append((tool_call, (yield from self._review_plan())))
                 continue
@@ -770,20 +777,64 @@ class Agent:
                 else self.tools.execute(tool_call)
             )
             completed.append((tool_call, result))
+            self._record_tool_result(tool_call, result)
             self._sync_active_skills()
         agent_calls = [call for call in allowed if call.name == "Agent"]
         for tool_call in agent_calls:
-            completed.append((tool_call, (yield from self._run_subagent(tool_call))))
-        completed.extend(
-            self.tools.execute_many(
-                [call for call in allowed if call.name not in {"LoadSkill", "Agent"}]
-            )
-        )
+            result = yield from self._run_subagent(tool_call)
+            completed.append((tool_call, result))
+            self._record_tool_result(tool_call, result)
+        for tool_call, result in self.tools.execute_many(
+            [call for call in allowed if call.name not in {"LoadSkill", "Agent"}]
+        ):
+            completed.append((tool_call, result))
+            self._record_tool_result(tool_call, result)
         self._sync_active_skills()
         if self.tools.dirty:
             self.context.set_tool_schemas(self.tools.schemas())
             self.tools.mark_clean()
         return completed
+
+    def _tool_loop_guard_result(self, tool_call: ToolCall) -> ToolResult | None:
+        failure_key = self._tool_failure_key(tool_call)
+        if (
+            failure_key is None
+            or self._tool_failures.get(failure_key, 0) < MAX_IDENTICAL_TOOL_FAILURES
+        ):
+            return None
+        return ToolResult(
+            "Loop guard: this identical side-effecting tool call already failed "
+            "twice. Inspect the current state or change the arguments before retrying.",
+            True,
+        )
+
+    def _tool_failure_key(self, tool_call: ToolCall) -> tuple[str, str] | None:
+        get_tool = getattr(self.tools, "get", None)
+        tool = get_tool(tool_call.name) if callable(get_tool) else None
+        if tool is None or tool.is_read_only:
+            return None
+        try:
+            arguments = json.dumps(
+                tool_call.arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return None
+        return tool_call.name, arguments
+
+    def _record_tool_result(self, tool_call: ToolCall, result: ToolResult) -> None:
+        failure_key = self._tool_failure_key(tool_call)
+        if failure_key is None:
+            return
+        if result.is_error:
+            self._tool_failures[failure_key] = (
+                self._tool_failures.get(failure_key, 0) + 1
+            )
+        else:
+            self._tool_failures.clear()
 
     def list_skills(self) -> Generator[AgentEvent, None, None]:
         yield from self._refresh_skills(force=True)

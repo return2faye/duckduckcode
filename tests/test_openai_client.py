@@ -736,6 +736,130 @@ class ToolManagerTest(unittest.TestCase):
 
 
 class AgentTest(unittest.TestCase):
+    def test_stream_blocks_third_identical_failed_side_effect(self) -> None:
+        requested_arguments = [
+            {"value": 1, "label": "same"},
+            {"label": "same", "value": 1},
+            {"value": 1, "label": "same"},
+            {"value": 2, "label": "changed"},
+            {"value": 3, "label": "success"},
+            {"value": 1, "label": "same"},
+        ]
+        executed = []
+
+        class Client:
+            calls = 0
+
+            def stream(self, messages, tools=None, reasoning=None):
+                if self.calls < len(requested_arguments):
+                    arguments = requested_arguments[self.calls]
+                    yield ToolCallEvent(
+                        ToolCall(f"call_{self.calls}", "Change", arguments)
+                    )
+                else:
+                    yield ConversationEvent("done")
+                self.calls += 1
+                yield DoneEvent()
+
+        def change(value, label):
+            executed.append(value)
+            return "changed" if value == 3 else ToolResult("failed", True)
+
+        tools = ToolManager()
+        tools.register(
+            "Change",
+            "Change state",
+            {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "integer"},
+                    "label": {"type": "string"},
+                },
+                "required": ["value", "label"],
+                "additionalProperties": False,
+            },
+            change,
+        )
+
+        events = list(Agent(Client(), tools=tools).stream("change it"))
+
+        self.assertEqual(executed, [1, 1, 2, 3, 1])
+        guarded = [
+            event
+            for event in events
+            if isinstance(event, ToolResultEvent) and "Loop guard" in event.content
+        ]
+        self.assertEqual(len(guarded), 1)
+        self.assertEqual(guarded[0].call_id, "call_2")
+        self.assertTrue(guarded[0].is_error)
+
+    def test_stream_does_not_guard_read_only_failures(self) -> None:
+        executed = []
+
+        class Client:
+            calls = 0
+
+            def stream(self, messages, tools=None, reasoning=None):
+                if self.calls < 3:
+                    yield ToolCallEvent(ToolCall(f"call_{self.calls}", "Inspect", {}))
+                else:
+                    yield ConversationEvent("done")
+                self.calls += 1
+                yield DoneEvent()
+
+        tools = ToolManager()
+        tools.register(
+            "Inspect",
+            "Inspect state",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda: executed.append("inspect") or ToolResult("failed", True),
+            is_read_only=True,
+        )
+
+        events = list(Agent(Client(), tools=tools).stream("inspect"))
+
+        self.assertEqual(executed, ["inspect", "inspect", "inspect"])
+        self.assertFalse(
+            any(
+                isinstance(event, ToolResultEvent) and "Loop guard" in event.content
+                for event in events
+            )
+        )
+
+    def test_stream_resets_failed_tool_calls_for_each_user_task(self) -> None:
+        executions = []
+
+        class Client:
+            calls_by_task = {"first": 0, "second": 0}
+
+            def stream(self, messages, tools=None, reasoning=None):
+                task = next(
+                    message.content
+                    for message in reversed(messages)
+                    if message.role == "user"
+                )
+                call = self.calls_by_task[task]
+                if call < (2 if task == "first" else 1):
+                    yield ToolCallEvent(ToolCall(f"{task}_{call}", "Change", {}))
+                else:
+                    yield ConversationEvent("done")
+                self.calls_by_task[task] += 1
+                yield DoneEvent()
+
+        tools = ToolManager()
+        tools.register(
+            "Change",
+            "Change state",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda: executions.append("change") or ToolResult("failed", True),
+        )
+        agent = Agent(Client(), tools=tools)
+
+        list(agent.stream("first"))
+        list(agent.stream("second"))
+
+        self.assertEqual(executions, ["change", "change", "change"])
+
     def test_context_status_reports_replayable_window_without_calling_model(
         self,
     ) -> None:

@@ -284,6 +284,23 @@ class DeepSeekClientTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "DEEPSEEK_API_KEY"):
             DeepSeekClient()
 
+    def test_stream_disables_thinking_for_no_reasoning(self) -> None:
+        completions = SimpleNamespace()
+        completions.create = lambda **kwargs: setattr(
+            completions, "kwargs", kwargs
+        ) or Events([chunk(content="summary")])
+        raw = SimpleNamespace(
+            chat=SimpleNamespace(completions=completions), close=lambda: None
+        )
+        with patch("duckduckcode.providers.deepseek.client.OpenAI", return_value=raw):
+            client = DeepSeekClient(api_key="deepseek-key")
+            list(client.stream([], reasoning=ReasoningConfig("none")))
+
+        self.assertNotIn("reasoning_effort", completions.kwargs)
+        self.assertEqual(
+            completions.kwargs["extra_body"], {"thinking": {"type": "disabled"}}
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

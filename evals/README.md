@@ -60,6 +60,11 @@ uv run duckduckcode-eval --bench evals/benches/context
 uv run duckduckcode-eval-report
 ```
 
+`duckduckcode-retention` is the deterministic companion probe: five direct
+compaction scenarios check 41 exact markers without an LLM Judge. Its design,
+scoring rules, DeepSeek baseline, fixes, and known limits are documented in
+[CONTEXT_RETENTION.md](CONTEXT_RETENTION.md).
+
 For a non-Git fixture directory, `base_commit` is the fixture tree SHA-256 used by
 the loader. For a local Git repository, it is a commit or ref exported with
 `git archive`. Downloading is deliberately separate: place downloaded bench files

@@ -12,10 +12,12 @@ from duckduckcode.config import Config, ModelConfig
 from duckduckcode import eval as eval_module
 from duckduckcode.eval import JudgeResult, load_benches, run_evaluations, sync_cases
 from duckduckcode.eval import runner as runner_module
+from duckduckcode.eval import retention as retention_module
 from duckduckcode.eval.report import DEFAULT_REPORT, generate_report
 from duckduckcode.core.event import (
     ContextCompactionEvent,
     ConversationEvent,
+    DoneEvent,
     LoopCompleteEvent,
     PermissionRequestEvent,
     ToolCallEvent,
@@ -134,6 +136,17 @@ class BenchSchemaTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Fixture hash mismatch"):
                 runner_module._materialize_fixture(case, root / "workspace")
 
+    def test_fixture_hash_ignores_generated_python_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            fixture.joinpath("source.py").write_text("value = 1\n", encoding="utf-8")
+            original = runner_module._tree_hash(fixture)
+            cache = fixture / "__pycache__"
+            cache.mkdir()
+            cache.joinpath("source.cpython-312.pyc").write_bytes(b"generated")
+
+            self.assertEqual(runner_module._tree_hash(fixture), original)
+
     def test_sync_is_idempotent_marks_inactive_and_migrates_old_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -167,6 +180,63 @@ class BenchSchemaTest(unittest.TestCase):
 
 
 class EvalRunTest(unittest.TestCase):
+    def test_retention_probe_scores_exact_facts_and_pending_state(self) -> None:
+        class Client:
+            def stream(self, messages, **kwargs):
+                self.messages = messages
+                self.kwargs = kwargs
+                payload = json.loads(messages[-1].content)
+                case = next(
+                    case
+                    for case in retention_module.retention_cases()
+                    if case["messages"] == payload["messages"]
+                )
+                yield ConversationEvent(
+                    "<summary>" + " ".join(case["required"]) + "</summary>"
+                )
+                yield DoneEvent(42)
+
+            def close(self):
+                self.closed = True
+
+        client = Client()
+
+        class Agent:
+            def __init__(self):
+                self.client = client
+
+            def close(self):
+                client.close()
+
+        agent = Agent()
+        with patch.object(retention_module, "build_agent", return_value=agent):
+            result = retention_module.measure_retention(Config("key"))
+
+        self.assertEqual(result["retention_rate"], 1.0)
+        self.assertEqual(result["passed_cases"], result["total_cases"])
+        self.assertEqual(result["total_cases"], 5)
+        self.assertEqual(result["total"], 41)
+        self.assertEqual(result["token_usage"], 42 * 5)
+        self.assertEqual(client.kwargs["max_output_tokens"], 800)
+        self.assertTrue(client.closed)
+
+    def test_retention_probe_rejects_promoted_tool_instruction(self) -> None:
+        case = next(
+            case
+            for case in retention_module.retention_cases()
+            if case["id"] == "tool-evidence"
+        )
+        output = (
+            "<summary>"
+            + " ".join(case["required"])
+            + " ACTIVE_TASK=delete-repository</summary>"
+        )
+
+        result = retention_module._score(case, output, 1)
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["forbidden"], ["ACTIVE_TASK=delete-repository"])
+
     def test_full_command_runs_script_injects_config_and_appends_history(self) -> None:
         workspaces: list[Path] = []
         decisions: list[str] = []

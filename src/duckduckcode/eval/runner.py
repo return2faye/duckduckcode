@@ -430,6 +430,8 @@ def _materialize_fixture(case: BenchCase, workspace: Path) -> None:
 def _tree_hash(root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*")):
+        if _ignored(path.relative_to(root)):
+            continue
         if path.is_symlink():
             raise RuntimeError(f"Repo fixture contains a symlink: {path}")
         if not path.is_file():

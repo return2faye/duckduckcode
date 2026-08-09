@@ -55,13 +55,17 @@ class DeepSeekClient(Client):
         reasoning: ReasoningConfig | None = None,
         max_output_tokens: int | None = None,
     ) -> Iterator[StreamEvent]:
+        effort = (reasoning or ReasoningConfig()).effort
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": self.serializer.serialize(messages),
-            "reasoning_effort": (reasoning or ReasoningConfig()).effort,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if effort == "none":
+            payload["extra_body"] = {"thinking": {"type": "disabled"}}
+        else:
+            payload["reasoning_effort"] = effort
         if tools:
             payload["tools"] = serialize_tools(tools)
         if max_output_tokens is not None:

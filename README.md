@@ -540,6 +540,7 @@ uv run duckduckcode-eval
 uv run duckduckcode-eval --case single-file-bug
 uv run duckduckcode-eval --bench path/to/bench.jsonl
 uv run duckduckcode-eval --bench evals/benches/context
+uv run duckduckcode-retention
 uv run duckduckcode-eval-report
 ```
 
@@ -559,6 +560,9 @@ without promoting irrelevant padding. `duckduckcode-eval-report` renders the
 latest batch as `.duckduckcode/eval-reports/eval-report.html`, including token usage,
 compaction before/after sizes and summaries, complete tool arguments/results/errors,
 permission decisions, tests, scores, and diffs. The Judge receives the same tool trace.
+The separate `duckduckcode-retention` command runs five direct compaction
+scenarios with 41 exact assertions; see
+[evals/CONTEXT_RETENTION.md](evals/CONTEXT_RETENTION.md).
 
 SQLite stores local evaluation state only:
 
@@ -577,3 +581,35 @@ SQLite is used because batch/case filtering, append-only history, schema migrati
 and regenerating reports are needed together; Python provides it in the standard
 library and writes one local transactional file. It is not the benchmark source of
 truth. For a disposable single-run result, JSONL would be enough.
+
+### SWE-bench Live
+
+`duckduckcode-swebench-live` downloads every row of Microsoft's official
+`SWE-bench-Live/SWE-bench-Live` `full` split from Hugging Face by default,
+checks out each declared `base_commit` from a repository cache, runs the Agent in
+a temporary clone, and atomically writes the prediction object accepted by the
+official evaluator. Gold `patch` and `test_patch` fields are deliberately not
+shown to the Agent. `--split lite|test|verified` is available for cheaper trial
+runs; `--dataset-file` accepts an offline official JSON/JSONL export. Duplicate
+instance IDs whose complete upstream rows are identical are evaluated once
+because the official prediction format is keyed by instance ID; conflicting
+duplicates are rejected.
+
+```bash
+uv run duckduckcode-swebench-live \
+  --repository-cache ~/.cache/duckduckcode/swebench-repos \
+  --predictions .duckduckcode/swebench-predictions.json \
+  --clone-missing
+```
+
+The output keeps completed/error metadata for diagnosis, while the official
+runner reads only `model_patch`. Existing predictions are resumable and skipped
+unless `--overwrite` is given. Agent network tool calls are denied; repository
+cloning occurs only when `--clone-missing` is explicit and Git prompts are
+disabled.
+
+Use the upstream [SWE-bench Live evaluator](https://github.com/microsoft/SWE-bench-Live/tree/70ec57e852e3f2d195790fe71f553e272c691833/evaluation)
+to score predictions in its instance-specific Docker images. Local inference is
+not a substitute for that deterministic Docker score. The upstream project notes
+that a typical instance needs about 4 CPUs and 16 GB RAM, with some repositories
+requiring substantially more.

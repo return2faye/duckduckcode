@@ -19,6 +19,8 @@ dependencies = [
 duckduckcode = "duckduckcode.main:main"
 duckduckcode-eval = "duckduckcode.eval:main"
 duckduckcode-eval-report = "duckduckcode.eval.report:main"
+duckduckcode-swebench-live = "duckduckcode.eval.swebench_live:main"
+duckduckcode-retention = "duckduckcode.eval.retention:main"
 
 [build-system]
 requires = ["uv_build>=0.11.19,<0.12.0"]

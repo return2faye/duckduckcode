@@ -31,7 +31,11 @@ from duckduckcode.core.event import (
     TurnCompleteEvent,
     UsageEvent,
 )
-from duckduckcode.core.prompts import buildSystemPrompt, build_system_prompt
+from duckduckcode.core.prompts import (
+    COMPACTION_SYSTEM_PROMPT,
+    buildSystemPrompt,
+    build_system_prompt,
+)
 from duckduckcode.providers.openai.client import OpenAIClient
 from duckduckcode.providers.openai.serialize import (
     OpenAIResponsesDeserializer,
@@ -243,6 +247,12 @@ class OpenAIClientTest(unittest.TestCase):
         )
         self.assertNotIn("instructions", payload)
         self.assertEqual(payload["reasoning"], {"effort": "low"})
+        self.assertEqual(
+            OpenAIResponsesSerializer().serialize([], ReasoningConfig("none"))[
+                "reasoning"
+            ],
+            {"effort": "low"},
+        )
 
     def test_openai_serializer_handles_tool_messages(self) -> None:
         payload = OpenAIResponsesSerializer().serialize(
@@ -461,6 +471,12 @@ class ContextManagerTest(unittest.TestCase):
             context.model_messages()[0],
             Message("system", "system: immutable project rule"),
         )
+
+    def test_system_prompt_explains_numbered_read_output_and_verification(self) -> None:
+        prompt = build_system_prompt()
+
+        self.assertIn("line-number prefixes", prompt)
+        self.assertIn("Do not claim completion", prompt)
 
     def test_context_compacts_complete_old_turns_and_keeps_recent_messages(
         self,
@@ -898,7 +914,7 @@ class AgentTest(unittest.TestCase):
                 reasoning=None,
                 max_output_tokens=None,
             ):
-                calls.append((messages, tools, max_output_tokens))
+                calls.append((messages, tools, max_output_tokens, reasoning))
                 yield ConversationEvent("<analysis>facts checked</analysis>")
                 yield ConversationEvent("<summary>durable summary</summary>")
                 yield DoneEvent(25)
@@ -925,6 +941,15 @@ class AgentTest(unittest.TestCase):
 
         self.assertEqual(calls[0][1], tools.schemas())
         self.assertEqual(calls[0][2], COMPACTION_OUTPUT_TOKENS)
+        self.assertEqual(calls[0][3], ReasoningConfig("none"))
+        self.assertNotIn("<analysis>", COMPACTION_SYSTEM_PROMPT)
+        self.assertIn(
+            "Never replace required values with ranges", COMPACTION_SYSTEM_PROMPT
+        )
+        self.assertIn("Preserve each key=value record", COMPACTION_SYSTEM_PROMPT)
+        self.assertIn(
+            "Apply state transitions chronologically", COMPACTION_SYSTEM_PROMPT
+        )
         self.assertNotIn("Do not call tools", calls[0][0][0].content)
         self.assertEqual(context.abstraction, "durable summary")
         self.assertEqual(context.messages(), [Message("user", "current request")])

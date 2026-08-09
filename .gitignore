@@ -15,6 +15,7 @@ __pycache__/
 /.duckduckcode/evals.sqlite3
 /.duckduckcode/eval-report.html
 /.duckduckcode/eval-reports/
+/.duckduckcode/swebench-*.json
 /.duckduckcode/sessions/
 /.duckduckcode/worktrees.json
 /docs/

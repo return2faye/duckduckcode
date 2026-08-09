@@ -33,7 +33,9 @@ class OpenAIResponsesSerializer(MessageSerializer):
     ) -> dict[str, Any]:
         return {
             "input": [message.to_openai() for message in messages],
-            "reasoning": {"effort": reasoning.effort},
+            "reasoning": {
+                "effort": "low" if reasoning.effort == "none" else reasoning.effort
+            },
         }
 
 

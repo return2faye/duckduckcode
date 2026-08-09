@@ -12,6 +12,7 @@ from .context import (
     COMPACTION_OUTPUT_TOKENS,
     ContextManager,
     Message,
+    ReasoningConfig,
 )
 from .event import (
     AgentEvent,
@@ -565,7 +566,7 @@ class Agent:
                 for event in self.client.stream(
                     messages,
                     tools=tools,
-                    reasoning=self.context.reasoning,
+                    reasoning=ReasoningConfig("none"),
                     max_output_tokens=max_output_tokens,
                 ):
                     if isinstance(event, ConversationEvent):
@@ -595,8 +596,7 @@ class Agent:
                                 tool_call.call_id,
                                 ToolResult(
                                     "Tools are unavailable during context compaction. "
-                                    "Return only the required <analysis> and <summary> "
-                                    "sections.",
+                                    "Return only the required <summary> section.",
                                     is_error=True,
                                 ).to_model_output(),
                             )
@@ -1256,12 +1256,10 @@ class Agent:
 
 
 def _extract_summary(output: str) -> str:
-    analysis_start = output.find("<analysis>")
-    analysis_end = output.find("</analysis>", analysis_start + len("<analysis>"))
-    summary_start = output.find("<summary>", analysis_end + len("</analysis>"))
+    summary_start = output.find("<summary>")
     summary_end = output.find("</summary>", summary_start + len("<summary>"))
-    if min(analysis_start, analysis_end, summary_start, summary_end) < 0:
-        raise RuntimeError("the model did not return analysis and summary sections")
+    if min(summary_start, summary_end) < 0:
+        raise RuntimeError("the model did not return a summary section")
     summary = output[summary_start + len("<summary>") : summary_end].strip()
     if not summary:
         raise RuntimeError("the model returned an empty summary")

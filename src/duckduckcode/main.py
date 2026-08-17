@@ -144,12 +144,10 @@ def build_agent(
     try:
         settings = getattr(config, model_role)
         model = model_override or settings.model
-        policy: RulePolicy | None = None
         os_sandbox = OSSandbox(
             workspace,
             path_sandbox.temporary_directory,
-            lambda: force_os_sandbox
-            or (policy is not None and policy.permission_mode != "full_access"),
+            force_os_sandbox,
             read_only_paths,
         )
         tools = ToolManager(source=query_source)
@@ -310,6 +308,7 @@ def build_agent(
             mcp_manager=mcp_manager,
             lsp_manager=lsp_manager,
             owns_lsp_manager=owns_lsp_manager,
+            os_sandbox=os_sandbox,
         )
     except Exception:
         if "owns_lsp_manager" in locals() and owns_lsp_manager:
@@ -347,7 +346,9 @@ def run_subagent_worker(config: Config) -> None:
             enable_lsp=False,
             allowed_tools=allowed,
             query_source=QuerySource.SUBAGENT,
-            force_os_sandbox=bool(request.get("isolation", False)),
+            force_os_sandbox=bool(
+                request.get("isolation", False) or request.get("os_sandbox", False)
+            ),
             protect_git_metadata=bool(request.get("worktree", False)),
             read_only_paths=tuple(
                 Path(value).resolve()

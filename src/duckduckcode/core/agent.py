@@ -42,6 +42,7 @@ from .lsp import LSPManager
 from .mcp import MCPManager
 from .subagent import DefinitionManager, SubagentManager
 from ..permissions import PermissionChecker, PermissionMode
+from ..tools.os_sandbox import OSSandbox
 from ..tools.tool import (
     QuerySource,
     ToolCall,
@@ -78,6 +79,7 @@ class Agent:
         mcp_manager: MCPManager | None = None,
         lsp_manager: LSPManager | None = None,
         owns_lsp_manager: bool = False,
+        os_sandbox: OSSandbox | None = None,
     ) -> None:
         if (
             isinstance(max_iterations, bool)
@@ -103,6 +105,7 @@ class Agent:
         self._mcp_initialized = False
         self.lsp_manager = lsp_manager
         self._owns_lsp_manager = owns_lsp_manager
+        self.os_sandbox = os_sandbox
         self._lsp_initialized = False
         self._runtime_conversation_key = uuid4().hex
         self._skill_list_snapshot: tuple[dict[str, Any], ...] | None = None
@@ -132,6 +135,15 @@ class Agent:
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self.permission_checker.set_permission_mode(mode)
+
+    def set_os_sandbox(self, enabled: bool) -> None:
+        if not isinstance(enabled, bool):
+            raise ValueError("OS sandbox state must be a boolean.")
+        if self.os_sandbox is None:
+            raise RuntimeError("OS sandbox is not configured.")
+        self.os_sandbox.enabled = enabled
+        if self.subagent_manager is not None:
+            self.subagent_manager.os_sandbox_enabled = enabled
 
     def initialize(self) -> Generator[AgentEvent, AgentResponse, None]:
         if self._session_snapshot is not None:
@@ -980,6 +992,8 @@ class Agent:
         history = deepcopy(messages[:user_index])
         try:
             child = self._fork_agent_factory()
+            if child.os_sandbox is not None and self.os_sandbox is not None:
+                child.set_os_sandbox(self.os_sandbox.enabled)
             child.context.system_prompt = _fork_system_prompt(
                 self.context.system_prompt, child.context.system_prompt
             )

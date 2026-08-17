@@ -335,9 +335,10 @@ class SubagentManagerTest(unittest.TestCase):
                 "request = json.loads(sys.stdin.readline())\n"
                 "print(json.dumps({'type':'tool_use','call_id':'inner','name':'ReadFile','arguments':{'path':'x'}}), flush=True)\n"
                 "print(json.dumps({'type':'usage','total_tokens':9}), flush=True)\n"
-                "print(json.dumps({'type':'worker_result','status':'completed','result':'evidence'}), flush=True)\n",
+                "print(json.dumps({'type':'worker_result','status':'completed','result':str(request['os_sandbox'])}), flush=True)\n",
             )
             manager = SubagentManager(workspace, worker_command=command)
+            manager.os_sandbox_enabled = True
             self.addCleanup(manager.close)
 
             stream = manager.run(
@@ -368,7 +369,7 @@ class SubagentManagerTest(unittest.TestCase):
             self.assertIn(SubagentEvent(task_id, "reader", "completed", False), events)
             payload = json.loads(result.content)
             self.assertFalse(result.is_error)
-            self.assertEqual(payload["result"], "evidence")
+            self.assertEqual(payload["result"], "True")
             self.assertEqual(payload["status"], "completed")
             self.assertFalse(payload["background"])
 

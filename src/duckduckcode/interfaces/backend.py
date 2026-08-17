@@ -59,6 +59,9 @@ def run_backend(
                 if data.get("type") == "set_permission_mode":
                     agent.set_permission_mode(data.get("mode"))
                     continue
+                if data.get("type") == "set_os_sandbox":
+                    agent.set_os_sandbox(data.get("enabled"))
+                    continue
                 if data.get("type") == "initialize":
                     active = True
                     _run_initialize(agent.initialize(), input_stream, output_stream)

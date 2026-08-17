@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import errno
 import os
 from dataclasses import dataclass
@@ -99,7 +98,7 @@ class OSSandbox:
         self,
         workspace: Path,
         temporary_directory: Path,
-        enabled: Callable[[], bool],
+        enabled: bool = False,
         read_only_paths: tuple[Path, ...] = (),
     ) -> None:
         self.workspace = workspace.resolve()
@@ -109,7 +108,7 @@ class OSSandbox:
         self.system = platform.system().lower()
 
     def prepare(self, command: str, network_access: bool) -> SandboxedCommand | None:
-        if not self.enabled():
+        if not self.enabled:
             return None
         if self.system == "darwin":
             return self._darwin(command, network_access)

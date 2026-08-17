@@ -72,6 +72,10 @@ PERMISSION_MODE_OPTIONS = (
 PERMISSION_MODE_NAMES = {
     mode: label.partition(" ·")[0] for mode, label in PERMISSION_MODE_OPTIONS
 }
+SANDBOX_OPTIONS = (
+    (True, "On · 使用 Seatbelt 限制文件写入和网络连接"),
+    (False, "Off · 在 host 工作目录中运行"),
+)
 
 
 class PipeBackend:
@@ -174,6 +178,12 @@ class PipeBackend:
         )
         self.process.stdin.flush()
 
+    def set_os_sandbox(self, enabled: bool) -> None:
+        self.process.stdin.write(
+            json.dumps({"type": "set_os_sandbox", "enabled": enabled}) + "\n"
+        )
+        self.process.stdin.flush()
+
     def respond_plan_review(self, approved: bool, feedback: str = "") -> None:
         self.process.stdin.write(
             json.dumps(
@@ -263,6 +273,9 @@ class _Tui:
         self._permission_mode_open = False
         self._permission_mode_selection = 1
         self.permission_mode = permission_mode
+        self._sandbox_open = False
+        self._sandbox_selection = 1
+        self.sandbox_enabled = False
         self._session_options: tuple[dict[str, Any], ...] | None = None
         self._session_selection = 0
         self._session_action = "resume"
@@ -317,6 +330,9 @@ class _Tui:
                     continue
                 if self._permission_mode_open and key not in {3, "\x03"}:
                     self._handle_permission_mode_key(key)
+                    continue
+                if self._sandbox_open and key not in {3, "\x03"}:
+                    self._handle_sandbox_key(key)
                     continue
                 if self._session_options is not None:
                     self._handle_session_key(key)
@@ -432,6 +448,9 @@ class _Tui:
                     for index, (mode, _) in enumerate(PERMISSION_MODE_OPTIONS)
                     if mode == self.permission_mode
                 )
+            elif slash_command[0] == "sandbox":
+                self._sandbox_open = True
+                self._sandbox_selection = 0 if self.sandbox_enabled else 1
             elif slash_command[0] == "skills":
                 self._skill_menu_open = True
                 self._skill_selection = 0
@@ -856,6 +875,26 @@ class _Tui:
         self.backend.set_permission_mode(self.permission_mode)
         self._permission_mode_open = False
 
+    def _handle_sandbox_key(self, key: object) -> None:
+        if key == curses.KEY_UP:
+            self._sandbox_selection = (self._sandbox_selection - 1) % len(
+                SANDBOX_OPTIONS
+            )
+            return
+        if key == curses.KEY_DOWN:
+            self._sandbox_selection = (self._sandbox_selection + 1) % len(
+                SANDBOX_OPTIONS
+            )
+            return
+        if key in {27, "\x1b"}:
+            self._sandbox_open = False
+            return
+        if key not in {10, 13, "\n", "\r"}:
+            return
+        self.sandbox_enabled = SANDBOX_OPTIONS[self._sandbox_selection][0]
+        self.backend.set_os_sandbox(self.sandbox_enabled)
+        self._sandbox_open = False
+
     def _handle_session_key(self, key: object) -> None:
         options = self._session_options
         if not options:
@@ -1110,6 +1149,7 @@ class _Tui:
         permission_mode_height = (
             len(PERMISSION_MODE_OPTIONS) + 2 if self._permission_mode_open else 0
         )
+        sandbox_height = len(SANDBOX_OPTIONS) + 2 if self._sandbox_open else 0
         session_height = (
             min(len(self._session_options), SESSION_MENU_ROWS) + 2
             if self._session_options is not None
@@ -1127,6 +1167,7 @@ class _Tui:
             if self._permission_request is None
             and self._plan_review is None
             and not self._permission_mode_open
+            and not self._sandbox_open
             and self._session_options is None
             and not self._skill_menu_open
             else None
@@ -1142,6 +1183,7 @@ class _Tui:
             permission_height
             or plan_review_height
             or permission_mode_height
+            or sandbox_height
             or session_height
             or skill_height
             or slash_height
@@ -1269,7 +1311,9 @@ class _Tui:
             input_y,
             2,
             _clip(
-                f" permissions: {PERMISSION_MODE_NAMES[self.permission_mode]} ",
+                " permissions: "
+                f"{PERMISSION_MODE_NAMES[self.permission_mode]}"
+                f" · sandbox: {'On' if self.sandbox_enabled else 'Off'} ",
                 max(1, width - 4),
             ),
             _color(MUTED_COLOR),
@@ -1325,6 +1369,12 @@ class _Tui:
             )
         elif self._permission_mode_open:
             self._draw_permission_mode_panel(
+                input_y + len(visible_input) + 2,
+                width,
+                separator,
+            )
+        elif self._sandbox_open:
+            self._draw_sandbox_panel(
                 input_y + len(visible_input) + 2,
                 width,
                 separator,
@@ -1448,6 +1498,34 @@ class _Tui:
             )
         self.screen.hline(
             top + 1 + len(PERMISSION_MODE_OPTIONS),
+            0,
+            curses.ACS_HLINE,
+            width,
+            separator,
+        )
+
+    def _draw_sandbox_panel(self, top: int, width: int, separator: int) -> None:
+        self.screen.addstr(
+            top,
+            0,
+            _clip("? 选择 OS sandbox", width),
+            _color(DUCK_COLOR) | curses.A_BOLD,
+        )
+        for index, (_, label) in enumerate(SANDBOX_OPTIONS):
+            attributes = _color(TEXT_COLOR)
+            if index == self._sandbox_selection:
+                attributes |= curses.A_REVERSE
+            self.screen.addstr(
+                top + 1 + index,
+                2,
+                _clip(
+                    ("› " if index == self._sandbox_selection else "  ") + label,
+                    max(1, width - 2),
+                ),
+                attributes,
+            )
+        self.screen.hline(
+            top + 1 + len(SANDBOX_OPTIONS),
             0,
             curses.ACS_HLINE,
             width,

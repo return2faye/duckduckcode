@@ -278,6 +278,7 @@ class TuiTest(unittest.TestCase):
         backend.set_mode("plan")
         backend.set_mode("default")
         backend.set_permission_mode("accept_edits")
+        backend.set_os_sandbox(True)
         backend.respond_plan_review(False, "Use SQLite instead")
 
         process.stdin.seek(0)
@@ -287,6 +288,7 @@ class TuiTest(unittest.TestCase):
                 {"type": "set_mode", "mode": "plan"},
                 {"type": "set_mode", "mode": "default"},
                 {"type": "set_permission_mode", "mode": "accept_edits"},
+                {"type": "set_os_sandbox", "enabled": True},
                 {
                     "type": "plan_review_response",
                     "approved": False,
@@ -499,6 +501,7 @@ class TuiTest(unittest.TestCase):
                     "/new  Start a new session\n"
                     "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode\n"
+                    "/sandbox  Choose whether to use the OS sandbox\n"
                     "/sessions  List saved sessions\n"
                     "/skills  Choose Skills for the next prompt\n"
                     "/status  Show context window usage",
@@ -547,6 +550,7 @@ class TuiTest(unittest.TestCase):
         self.assertEqual(
             suggestions("/s"),
             [
+                ("/sandbox", "Choose whether to use the OS sandbox"),
                 ("/sessions", "List saved sessions"),
                 ("/skills", "Choose Skills for the next prompt"),
                 ("/status", "Show context window usage"),
@@ -562,6 +566,10 @@ class TuiTest(unittest.TestCase):
         self.assertEqual(
             slash_command_module.handle_slash_command("/status"),
             ("status", ""),
+        )
+        self.assertEqual(
+            slash_command_module.handle_slash_command("/sandbox"),
+            ("sandbox", ""),
         )
         self.assertEqual(
             slash_command_module.handle_slash_command("/sessions"),
@@ -643,6 +651,32 @@ class TuiTest(unittest.TestCase):
         self.assertFalse(tui._permission_mode_open)
         self.assertEqual(tui.permission_mode, "accept_edits")
         self.assertEqual(backend.permission_modes, ["accept_edits"])
+        self.assertEqual(tui.messages, [])
+        self.assertIsNone(tui._events)
+
+    def test_sandbox_slash_command_opens_and_applies_mode_menu(self) -> None:
+        class FakeBackend:
+            def __init__(self) -> None:
+                self.states = []
+
+            def set_os_sandbox(self, enabled):
+                self.states.append(enabled)
+
+        backend = FakeBackend()
+        tui = _Tui(object(), "model", "/tmp", backend)
+        tui.input = "/sandbox"
+        tui.cursor_index = len(tui.input)
+
+        tui._send()
+
+        self.assertTrue(tui._sandbox_open)
+        self.assertEqual(tui._sandbox_selection, 1)
+        tui._handle_sandbox_key(curses.KEY_UP)
+        tui._handle_sandbox_key("\n")
+
+        self.assertFalse(tui._sandbox_open)
+        self.assertTrue(tui.sandbox_enabled)
+        self.assertEqual(backend.states, [True])
         self.assertEqual(tui.messages, [])
         self.assertIsNone(tui._events)
 
@@ -821,7 +855,7 @@ class TuiTest(unittest.TestCase):
             tui._draw()
 
         self.assertIn(
-            " permissions: Accept edits ",
+            " permissions: Accept edits · sandbox: Off ",
             [args[2] for args in screen.strings if len(args) >= 3],
         )
 
@@ -856,6 +890,7 @@ class TuiTest(unittest.TestCase):
                     "/new  Start a new session\n"
                     "/permissions  Choose a permission mode\n"
                     "/plan  Toggle Plan Mode\n"
+                    "/sandbox  Choose whether to use the OS sandbox\n"
                     "/sessions  List saved sessions\n"
                     "/skills  Choose Skills for the next prompt\n"
                     "/status  Show context window usage",

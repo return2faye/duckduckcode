@@ -9,6 +9,7 @@ _COMMANDS = {
     "/new": "Start a new session",
     "/permissions": "Choose a permission mode",
     "/plan": "Toggle Plan Mode",
+    "/sandbox": "Choose whether to use the OS sandbox",
     "/sessions": "List saved sessions",
     "/skills": "Choose Skills for the next prompt",
     "/status": "Show context window usage",
@@ -61,6 +62,8 @@ def handle_slash_command(
         return "mode", "plan"
     if command == "/permissions":
         return "permissions", ""
+    if command == "/sandbox":
+        return "sandbox", ""
     if command == "/skills":
         return "skills", ""
     if command == "/help":

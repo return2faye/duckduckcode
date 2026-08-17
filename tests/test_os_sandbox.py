@@ -22,7 +22,7 @@ class OSSandboxTest(unittest.TestCase):
         with patch(
             "duckduckcode.tools.os_sandbox.platform.system", return_value="Plan9"
         ):
-            sandbox = OSSandbox(self.workspace, self.private_temp, lambda: False)
+            sandbox = OSSandbox(self.workspace, self.private_temp)
 
         self.assertIsNone(sandbox.prepare("pwd", False))
 
@@ -37,7 +37,7 @@ class OSSandboxTest(unittest.TestCase):
                 return_value=True,
             ),
         ):
-            sandbox = OSSandbox(self.workspace, self.private_temp, lambda: True)
+            sandbox = OSSandbox(self.workspace, self.private_temp, True)
             offline = sandbox.prepare("uv sync", False)
             online = sandbox.prepare("uv sync", True)
 
@@ -61,7 +61,7 @@ class OSSandboxTest(unittest.TestCase):
             sandbox = OSSandbox(
                 self.workspace,
                 self.private_temp,
-                lambda: True,
+                True,
                 (dependency,),
             )
             command = sandbox.prepare("true", False)
@@ -84,7 +84,7 @@ class OSSandboxTest(unittest.TestCase):
                 return_value=True,
             ),
         ):
-            sandbox = OSSandbox(self.workspace, self.private_temp, lambda: True)
+            sandbox = OSSandbox(self.workspace, self.private_temp, True)
             offline = sandbox.prepare("uv sync", False)
             online = sandbox.prepare("uv sync", True)
 
@@ -115,7 +115,7 @@ class OSSandboxTest(unittest.TestCase):
             sandbox = OSSandbox(
                 self.workspace,
                 self.private_temp,
-                lambda: True,
+                True,
                 (dependency,),
             )
             command = sandbox.prepare("true", False)

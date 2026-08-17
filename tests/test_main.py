@@ -221,7 +221,8 @@ class MainTest(unittest.TestCase):
             },
             "workspace": "/tmp",
             "permission_mode": "ask_for_approval",
-            "isolation": True,
+            "isolation": False,
+            "os_sandbox": True,
             "boilerplate": "No questions.",
         }
         output = io.StringIO()
@@ -238,6 +239,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(build.call_args.kwargs["max_iterations"], 6)
         self.assertEqual(build.call_args.kwargs["query_source"], QuerySource.SUBAGENT)
         self.assertEqual(build.call_args.kwargs["model_role"], "subagent")
+        self.assertTrue(build.call_args.kwargs["force_os_sandbox"])
         self.assertIsNone(build.call_args.kwargs["model_override"])
         self.assertFalse(build.call_args.kwargs["enable_sessions"])
         self.assertIn(("permission", "ask_for_approval"), calls)
@@ -471,7 +473,7 @@ class MainTest(unittest.TestCase):
                     compaction_target_tokens=1_000,
                 )
 
-    def test_full_access_disables_the_os_sandbox(self) -> None:
+    def test_os_sandbox_is_independent_from_permission_mode(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             sandbox = Mock()
@@ -481,11 +483,13 @@ class MainTest(unittest.TestCase):
             ):
                 agent = build_agent(Config("test-key"), workspace)
             self.addCleanup(agent.close)
-            enabled = factory.call_args.args[2]
-
-            self.assertTrue(enabled())
+            self.assertFalse(factory.call_args.args[2])
+            agent.set_os_sandbox(True)
+            self.assertTrue(sandbox.enabled)
             agent.set_permission_mode("full_access")
-            self.assertFalse(enabled())
+            self.assertTrue(sandbox.enabled)
+            agent.set_os_sandbox(False)
+            self.assertFalse(sandbox.enabled)
 
     def test_build_agent_injects_one_workspace_into_all_file_tools(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

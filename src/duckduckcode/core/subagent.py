@@ -213,6 +213,7 @@ class SubagentManager:
         self.max_tasks = max_tasks
         self.timeout = timeout
         self.parent_model = parent_model
+        self.os_sandbox_enabled = False
         self.worktree_manager = worktree_manager or WorktreeManager(
             self.workspace, home=home
         )
@@ -304,6 +305,7 @@ class SubagentManager:
                     definition,
                     working_directory,
                 )
+                request["os_sandbox"] = self.os_sandbox_enabled
                 request["model"] = arguments["model"] or self.parent_model
                 request["worktree"] = worktree is not None
                 request["worktree_read_files"] = (

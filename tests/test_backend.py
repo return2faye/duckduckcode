@@ -140,6 +140,9 @@ class BackendTest(unittest.TestCase):
             def set_permission_mode(self, mode):
                 calls.append(mode)
 
+            def set_os_sandbox(self, enabled):
+                calls.append(enabled)
+
             def stream(self, message):
                 calls.append(message)
                 yield LoopCompleteEvent("completed", 1)
@@ -150,6 +153,7 @@ class BackendTest(unittest.TestCase):
                 '{"type": "set_mode", "mode": "plan"}\n'
                 '{"type": "set_mode", "mode": "default"}\n'
                 '{"type": "set_permission_mode", "mode": "accept_edits"}\n'
+                '{"type": "set_os_sandbox", "enabled": true}\n'
                 '{"message": "design the feature"}\n'
             ),
             output_stream=io.StringIO(),
@@ -157,7 +161,7 @@ class BackendTest(unittest.TestCase):
 
         self.assertEqual(
             calls,
-            ["plan", "default", "accept_edits", "design the feature"],
+            ["plan", "default", "accept_edits", True, "design the feature"],
         )
 
     def test_backend_round_trips_free_form_plan_review_feedback(self) -> None:

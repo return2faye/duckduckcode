@@ -50,6 +50,17 @@ Chats resume the most recently active valid workspace session automatically. Use
 permanent deletion.
 Session switching is available only while the agent is idle and outside Plan Mode.
 
+Use `/plan` to enter Plan Mode. The agent writes the approval document to
+`.duckduckcode/plan.md` and maintains a separate structured task checklist at
+`.duckduckcode/checklist.md` through `UpdatePlan`. Approval keeps both files for
+execution; successful completion removes them, while failure, interruption, or
+the iteration limit preserves them for recovery. An unfinished or invalid
+checklist prevents the agent from reporting successful completion.
+
+For long tasks, the main agent may delegate independent repository research,
+diagnosis, test design, or review to read-only subagents. The main agent remains
+responsible for code changes, integration, verification, and checklist updates.
+
 ## Structure
 
 - `core/agent.py`: main multi-turn agent flow
@@ -75,8 +86,8 @@ Session switching is available only while the agent is idle and outside Plan Mod
 - `tools/worktree.py`: persistent worktree listing and protected removal tools
 
 `ContextManager` builds the model context: system prompt first, optional abstraction
-summary, long-term-memory snapshot, and stale-session reminder next, then user,
-assistant, tool-call, and tool-result messages.
+summary, long-term-memory snapshot, stale-session and active-checklist reminders
+next, then user, assistant, tool-call, and tool-result messages.
 
 `Agent` owns `ToolManager`, which treats built-in and MCP tools as equal `Tool`
 implementations. It passes their schemas into `ContextManager`, executes returned

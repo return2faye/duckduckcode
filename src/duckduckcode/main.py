@@ -49,6 +49,7 @@ from .tools.tool import (
     create_agent_tool,
     create_exit_plan_mode_tool,
     create_load_skill_tool,
+    create_update_plan_tool,
 )
 
 _PERMISSION_TOOL_NAMES = {
@@ -187,6 +188,8 @@ def build_agent(
             tools.register(create_bash_tool(workspace, os_sandbox))
         if enable_exit_plan_mode and enabled("ExitPlanMode"):
             tools.register(create_exit_plan_mode_tool())
+        if enable_exit_plan_mode and enabled("UpdatePlan"):
+            tools.register(create_update_plan_tool())
         if skill_manager is not None and enabled("LoadSkill"):
             tools.register(create_load_skill_tool(skill_manager.load))
         definition_manager = None
@@ -272,7 +275,11 @@ def build_agent(
                 [check_bash_blacklist, path_sandbox],
                 policy,
             ),
-            plan_file=workspace / ".duckduckcode" / "plan.md",
+            plan_file=(
+                workspace / ".duckduckcode" / "plan.md"
+                if enable_exit_plan_mode
+                else None
+            ),
             session_manager=session_manager,
             memory_manager=memory_manager,
             skill_manager=skill_manager,

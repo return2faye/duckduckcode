@@ -33,6 +33,7 @@ from duckduckcode.core.event import (
 )
 from duckduckcode.core.prompts import (
     COMPACTION_SYSTEM_PROMPT,
+    PLAN_MODE_REMINDER,
     buildSystemPrompt,
     build_system_prompt,
 )
@@ -47,6 +48,7 @@ from duckduckcode.tools.tool import (
     ToolManager,
     ToolResult,
     create_exit_plan_mode_tool,
+    create_update_plan_tool,
 )
 
 
@@ -418,8 +420,7 @@ class ContextManagerTest(unittest.TestCase):
                 Message("system", "system prompt"),
                 Message(
                     "system",
-                    "Plan Mode is active. Follow the Plan Mode rules in the system "
-                    "prompt. Do not execute the plan until the user approves it.",
+                    PLAN_MODE_REMINDER,
                 ),
                 Message("user", "investigate"),
             ],
@@ -752,6 +753,134 @@ class ToolManagerTest(unittest.TestCase):
 
 
 class AgentTest(unittest.TestCase):
+    def test_update_plan_writes_fixed_markdown_and_empty_plan_clears_it(self) -> None:
+        class DenyChecker:
+            def check(self, *_args, **_kwargs):
+                raise AssertionError("UpdatePlan must bypass permission checks")
+
+        tools = ToolManager()
+        tools.register(create_update_plan_tool())
+        with tempfile.TemporaryDirectory() as directory:
+            plan_file = Path(directory) / "plan.md"
+            agent = Agent(
+                object(),
+                tools=tools,
+                permission_checker=DenyChecker(),
+                plan_file=plan_file,
+            )
+            call = ToolCall(
+                "update",
+                "UpdatePlan",
+                {
+                    "explanation": "Work in order.",
+                    "plan": [
+                        {"step": "inspect", "status": "in_progress"},
+                        {"step": "verify", "status": "completed"},
+                    ],
+                },
+            )
+
+            execution = agent._execute_tools([call])
+            with self.assertRaises(StopIteration) as stopped:
+                next(execution)
+
+            result = stopped.exception.value[0][1]
+            self.assertFalse(result.is_error)
+            self.assertIn("- [ ] `in_progress` inspect", result.content)
+            self.assertIn("- [x] `completed` verify", result.content)
+            self.assertEqual(
+                plan_file.with_name("checklist.md").read_text(encoding="utf-8"),
+                "# DuckDuckCode Task Checklist\n\n"
+                "## Explanation\n> Work in order.\n\n"
+                "## Steps\n"
+                "- [ ] `in_progress` inspect\n"
+                "- [x] `completed` verify\n",
+            )
+            self.assertIn("Active task checklist", agent.context.checklist_reminder)
+
+            result = agent._update_plan({"explanation": None, "plan": []})
+
+            self.assertFalse(result.is_error)
+            self.assertFalse(plan_file.with_name("checklist.md").exists())
+            self.assertEqual(agent.context.checklist_reminder, "")
+
+    def test_unfinished_checklist_forces_another_iteration(self) -> None:
+        class Client:
+            calls = 0
+
+            def stream(self, messages, tools=None, reasoning=None):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ToolCallEvent(
+                        ToolCall(
+                            "start",
+                            "UpdatePlan",
+                            {
+                                "explanation": None,
+                                "plan": [
+                                    {"step": "finish work", "status": "in_progress"}
+                                ],
+                            },
+                        )
+                    )
+                elif self.calls == 3:
+                    yield ToolCallEvent(
+                        ToolCall(
+                            "complete",
+                            "UpdatePlan",
+                            {
+                                "explanation": None,
+                                "plan": [
+                                    {"step": "finish work", "status": "completed"}
+                                ],
+                            },
+                        )
+                    )
+                else:
+                    yield ConversationEvent("done")
+                yield DoneEvent()
+
+        tools = ToolManager()
+        tools.register(create_update_plan_tool())
+        with tempfile.TemporaryDirectory() as directory:
+            client = Client()
+            agent = Agent(
+                client,
+                tools=tools,
+                plan_file=Path(directory) / "plan.md",
+            )
+
+            events = list(agent.stream("do the work"))
+
+            self.assertEqual(client.calls, 4)
+            self.assertEqual(events[-1], LoopCompleteEvent("completed", 4))
+            self.assertFalse(agent.checklist_file.exists())
+            self.assertTrue(
+                any(
+                    message.role == "user"
+                    and "still has 1 unfinished step" in message.content
+                    for message in agent.context.messages()
+                )
+            )
+
+    def test_invalid_checklist_blocks_success_and_is_preserved(self) -> None:
+        class Client:
+            def stream(self, messages, tools=None, reasoning=None):
+                yield ConversationEvent("done")
+                yield DoneEvent()
+
+        with tempfile.TemporaryDirectory() as directory:
+            plan_file = Path(directory) / "plan.md"
+            checklist_file = plan_file.with_name("checklist.md")
+            checklist_file.write_text("broken", encoding="utf-8")
+            agent = Agent(Client(), plan_file=plan_file, max_iterations=2)
+
+            events = list(agent.stream("continue"))
+
+            self.assertEqual(events[-2].code, "max_iterations")
+            self.assertEqual(events[-1], LoopCompleteEvent("max_iterations", 2))
+            self.assertTrue(checklist_file.exists())
+
     def test_stream_blocks_third_identical_failed_side_effect(self) -> None:
         requested_arguments = [
             {"value": 1, "label": "same"},
@@ -1403,6 +1532,8 @@ class AgentTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             plan_file = Path(directory) / "plan.md"
             plan_file.write_text("stale plan", encoding="utf-8")
+            checklist_file = Path(directory) / "checklist.md"
+            checklist_file.write_text("stale checklist", encoding="utf-8")
             context = ContextManager(system_prompt="system")
             agent = Agent(object(), context)
 
@@ -1410,12 +1541,22 @@ class AgentTest(unittest.TestCase):
 
             self.assertEqual(context.mode, "plan")
             self.assertFalse(plan_file.exists())
+            self.assertFalse(checklist_file.exists())
+            self.assertIn(str(checklist_file), context.checklist_reminder)
 
             plan_file.write_text("current plan", encoding="utf-8")
+            agent._update_plan(
+                {
+                    "explanation": None,
+                    "plan": [{"step": "implement", "status": "pending"}],
+                }
+            )
             agent.cancel_plan_mode()
 
             self.assertEqual(context.mode, "default")
             self.assertFalse(plan_file.exists())
+            self.assertFalse(checklist_file.exists())
+            self.assertEqual(context.checklist_reminder, "")
             self.assertEqual(
                 context.messages()[-1],
                 Message(
@@ -1431,6 +1572,7 @@ class AgentTest(unittest.TestCase):
         calls = []
         tools = ToolManager()
         tools.register(create_exit_plan_mode_tool())
+        tools.register(create_update_plan_tool())
         tools.register(
             "implement",
             "Implement the plan",
@@ -1447,6 +1589,16 @@ class AgentTest(unittest.TestCase):
                     yield ConversationEvent("I will implement the plan now.")
                 elif len(calls) == 3:
                     yield ToolCallEvent(ToolCall("implement", "implement", {}))
+                    yield ToolCallEvent(
+                        ToolCall(
+                            "complete",
+                            "UpdatePlan",
+                            {
+                                "explanation": None,
+                                "plan": [{"step": "implement", "status": "completed"}],
+                            },
+                        )
+                    )
                 else:
                     yield ConversationEvent("done")
                 yield DoneEvent()
@@ -1459,6 +1611,12 @@ class AgentTest(unittest.TestCase):
             agent = Agent(FakeClient(), context, tools)
             agent.enter_plan_mode(plan_file)
             plan_file.write_text("# Plan", encoding="utf-8")
+            agent._update_plan(
+                {
+                    "explanation": None,
+                    "plan": [{"step": "implement", "status": "pending"}],
+                }
+            )
             stream = agent.stream("plan this")
 
             self.assertEqual(
@@ -1503,6 +1661,22 @@ class AgentTest(unittest.TestCase):
             )
         )
 
+    def test_exit_plan_mode_requires_a_valid_checklist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan_file = Path(directory) / "plan.md"
+            agent = Agent(object(), ContextManager(system_prompt="system"))
+            agent.enter_plan_mode(plan_file)
+            plan_file.write_text("# Plan", encoding="utf-8")
+
+            review = agent._review_plan()
+            with self.assertRaises(StopIteration) as stopped:
+                next(review)
+
+            self.assertTrue(stopped.exception.value.is_error)
+            self.assertIn(
+                "Checklist is missing or invalid", stopped.exception.value.content
+            )
+
     def test_plan_execution_wait_still_honors_the_iteration_limit(self) -> None:
         tools = ToolManager()
         tools.register(create_exit_plan_mode_tool())
@@ -1530,6 +1704,12 @@ class AgentTest(unittest.TestCase):
             )
             agent.enter_plan_mode(plan_file)
             plan_file.write_text("# Plan", encoding="utf-8")
+            agent._update_plan(
+                {
+                    "explanation": None,
+                    "plan": [{"step": "implement", "status": "pending"}],
+                }
+            )
             stream = agent.stream("plan this")
             next(stream)
             next(stream)
@@ -1538,6 +1718,7 @@ class AgentTest(unittest.TestCase):
                 *stream,
             ]
             self.assertTrue(plan_file.exists())
+            self.assertTrue(agent.checklist_file.exists())
 
         self.assertEqual(events[-2].code, "max_iterations")
         self.assertEqual(events[-1], LoopCompleteEvent("max_iterations", 3))
@@ -1575,6 +1756,12 @@ class AgentTest(unittest.TestCase):
             )
             agent.enter_plan_mode(plan_file)
             plan_file.write_text("# Plan", encoding="utf-8")
+            agent._update_plan(
+                {
+                    "explanation": None,
+                    "plan": [{"step": "implement", "status": "pending"}],
+                }
+            )
             stream = agent.stream("plan this")
             next(stream)
             next(stream)
@@ -1584,6 +1771,7 @@ class AgentTest(unittest.TestCase):
             ]
 
             self.assertTrue(plan_file.exists())
+            self.assertTrue(agent.checklist_file.exists())
 
         self.assertIn(
             ToolResultEvent("fail", "fail", "failed", is_error=True),
@@ -1612,6 +1800,12 @@ class AgentTest(unittest.TestCase):
             agent = Agent(FakeClient(), context, tools)
             agent.enter_plan_mode(plan_file)
             plan_file.write_text("# Plan", encoding="utf-8")
+            agent._update_plan(
+                {
+                    "explanation": None,
+                    "plan": [{"step": "implement", "status": "pending"}],
+                }
+            )
             stream = agent.stream("plan this")
             next(stream)
             next(stream)
@@ -1622,6 +1816,7 @@ class AgentTest(unittest.TestCase):
                 ),
                 *stream,
             ]
+            self.assertTrue(agent.checklist_file.exists())
 
         self.assertEqual(context.mode, "plan")
         self.assertIn(

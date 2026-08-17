@@ -2072,6 +2072,8 @@ def _format_tool_result(event: ToolResultEvent, expanded: bool) -> str:
             "unknown error",
         )
         return f"{header} · {summary[:160]} · [查看详情]"
+    if event.name == "UpdatePlan":
+        return f"{header}\n{result_content}" if result_content else header
     if (
         len(result_content.splitlines()) <= SHORT_TOOL_RESULT_LINES
         and len(result_content) <= SHORT_TOOL_RESULT_CHARS

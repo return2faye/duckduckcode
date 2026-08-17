@@ -96,6 +96,7 @@ class ContextManager:
             )
         self._messages: list[Message] = []
         self.reminder = ""
+        self.checklist_reminder = ""
         self.system_prompt = system_prompt or build_system_prompt(
             workspace,
             mode_instructions=mode_instructions,
@@ -255,6 +256,8 @@ class ContextManager:
             messages.append(Message("system", self.active_skills))
         if self.reminder:
             messages.append(Message("system", self.reminder))
+        if self.checklist_reminder:
+            messages.append(Message("system", self.checklist_reminder))
         if self.mode == "plan":
             messages.append(Message("system", PLAN_MODE_REMINDER))
         return messages + self.messages()
@@ -374,6 +377,9 @@ class ContextManager:
 
     def set_reminder(self, reminder: str) -> None:
         self.reminder = reminder
+
+    def set_checklist_reminder(self, reminder: str) -> None:
+        self.checklist_reminder = reminder
 
     def set_long_term_memory(self, memory: str) -> None:
         self.long_term_memory = memory

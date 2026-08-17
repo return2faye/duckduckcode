@@ -4,6 +4,8 @@ from collections.abc import Generator
 from copy import deepcopy
 import json
 from pathlib import Path
+import re
+import stat
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
@@ -49,6 +51,7 @@ from ..tools.tool import (
     ToolManager,
     ToolResult,
     create_agent_tool,
+    validate_update_plan_arguments,
     validate_agent_arguments,
     validate_load_skill_arguments,
 )
@@ -57,6 +60,9 @@ AgentResponse = PermissionChoice | PlanReviewResponse | None
 COMPACTION_MAX_ATTEMPTS = 3
 MAX_CONTEXT_LENGTH_RECOVERIES = 1
 MAX_IDENTICAL_TOOL_FAILURES = 2
+CHECKLIST_HEADER = "# DuckDuckCode Task Checklist"
+CHECKLIST_MAX_BYTES = 64 * 1024
+CHECKLIST_STEP_RE = re.compile(r"^- \[([ x])\] `(pending|in_progress|completed)` (.+)$")
 
 
 class Agent:
@@ -93,6 +99,11 @@ class Agent:
         self.max_iterations = max_iterations
         self.permission_checker = permission_checker or PermissionChecker()
         self.plan_file = Path(plan_file).resolve() if plan_file is not None else None
+        self.checklist_file = (
+            self.plan_file.with_name("checklist.md")
+            if self.plan_file is not None
+            else None
+        )
         self.session_manager = session_manager
         self.memory_manager = memory_manager
         self.skill_manager = skill_manager
@@ -115,23 +126,29 @@ class Agent:
         self._startup_checked = False
         self._compaction_circuit_open = False
         self._tool_failures: dict[tuple[str, str], int] = {}
+        self._sync_checklist_reminder()
 
     def enter_plan_mode(self, plan_file: str | Path | None = None) -> None:
         if plan_file is not None:
             self.plan_file = Path(plan_file).resolve()
         if self.plan_file is None:
             raise RuntimeError("Plan file is not configured.")
+        self.checklist_file = self.plan_file.with_name("checklist.md")
         self._remove_plan_file()
+        self._remove_checklist_file()
         self.context.set_mode("plan")
+        self._sync_checklist_reminder()
 
     def cancel_plan_mode(self) -> None:
         self._remove_plan_file()
+        self._remove_checklist_file()
         self._add_user(
             "Plan Mode was cancelled. Do not execute the pending plan "
             "unless the user asks again.",
             visible=False,
         )
         self.context.set_mode("default")
+        self._sync_checklist_reminder()
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self.permission_checker.set_permission_mode(mode)
@@ -451,8 +468,9 @@ class Agent:
                     if plan_approved:
                         plan_execution_pending = True
                         approved_plan_active = True
-                    if approved_plan_active and any(
-                        tool_call.name != "ExitPlanMode" and result.is_error
+                    if (approved_plan_active or self.context.mode != "plan") and any(
+                        tool_call.name not in {"ExitPlanMode", "UpdatePlan"}
+                        and result.is_error
                         for tool_call, result in completed_results
                     ):
                         plan_execution_failed = True
@@ -506,8 +524,25 @@ class Agent:
                         visible=False,
                     )
                     continue
+                checklist_blocker = self._checklist_blocker()
+                if (
+                    checklist_blocker is not None
+                    and self.context.mode != "plan"
+                    and not plan_execution_failed
+                ):
+                    if iteration == self.max_iterations:
+                        yield ErrorEvent(
+                            f"Agent stopped after {self.max_iterations} iterations.",
+                            "max_iterations",
+                        )
+                        yield LoopCompleteEvent("max_iterations", iteration)
+                        return
+                    self._add_user(checklist_blocker, visible=False)
+                    continue
                 if approved_plan_active and not plan_execution_failed:
                     self._remove_plan_file()
+                if not plan_execution_failed and self._checklist_is_complete():
+                    self._remove_checklist_file()
                 self._start_memory_worker(memory_start)
                 yield LoopCompleteEvent("completed", iteration)
                 return
@@ -693,6 +728,11 @@ class Agent:
             if tool_call.name == "ExitPlanMode":
                 completed.append((tool_call, (yield from self._review_plan())))
                 continue
+            get_tool = getattr(self.tools, "get", None)
+            tool = get_tool(tool_call.name) if callable(get_tool) else None
+            if tool_call.name == "UpdatePlan" and tool is not None:
+                completed.append((tool_call, self._update_plan(tool_call.arguments)))
+                continue
             if (
                 tool_call.name == "RemoveWorktree"
                 and self.subagent_manager is not None
@@ -735,8 +775,6 @@ class Agent:
                             )
                         )
                     continue
-            get_tool = getattr(self.tools, "get", None)
-            tool = get_tool(tool_call.name) if callable(get_tool) else None
             if (
                 self.subagent_manager is not None
                 and self.subagent_manager.workspace_busy
@@ -1135,9 +1173,20 @@ class Agent:
             content = self.plan_file.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             return ToolResult(f"Could not read plan file: {exc}", is_error=True)
+        if not content.strip():
+            return ToolResult("The Plan file is empty. Write the plan first.", True)
+        try:
+            checklist = self._read_checklist()
+        except (OSError, UnicodeError, ValueError) as exc:
+            return ToolResult(f"Checklist is missing or invalid: {exc}", True)
+        if not checklist:
+            return ToolResult(
+                "The Checklist file is empty. Call UpdatePlan first.", True
+            )
         response = yield PlanReviewEvent(str(self.plan_file), content)
         if response is not None and response.approved:
             self.context.set_mode("default")
+            self._sync_checklist_reminder()
             return ToolResult(
                 "Plan approved. Plan Mode is now inactive; execute the plan."
             )
@@ -1149,6 +1198,134 @@ class Agent:
     def _remove_plan_file(self) -> None:
         if self.plan_file is not None:
             self.plan_file.unlink(missing_ok=True)
+
+    def _update_plan(self, arguments: dict[str, Any]) -> ToolResult:
+        if self.checklist_file is None:
+            return ToolResult("Checklist file is not configured.", True)
+        try:
+            normalized = validate_update_plan_arguments(arguments)
+            plan = normalized["plan"]
+            if not plan:
+                self._remove_checklist_file()
+                return ToolResult("Task checklist cleared.")
+            self.checklist_file.parent.mkdir(parents=True, exist_ok=True)
+            self._validate_checklist_target()
+            rendered = _render_checklist(normalized["explanation"], plan)
+            self.checklist_file.write_text(rendered, encoding="utf-8")
+            self._sync_checklist_reminder()
+        except (OSError, UnicodeError, ValueError) as exc:
+            return ToolResult(f"UpdatePlan failed: {exc}", True)
+        completed = sum(item["status"] == "completed" for item in plan)
+        return ToolResult(
+            f"Checklist updated at {self.checklist_file}: "
+            f"{completed}/{len(plan)} steps completed.\n\n{rendered.rstrip()}"
+        )
+
+    def _read_checklist(self) -> list[dict[str, str]]:
+        if self.checklist_file is None:
+            raise ValueError("Checklist file does not exist")
+        self._validate_checklist_target()
+        if not self.checklist_file.exists():
+            raise ValueError("Checklist file does not exist")
+        if self.checklist_file.stat().st_size > CHECKLIST_MAX_BYTES:
+            raise ValueError("Checklist file is too large")
+        lines = self.checklist_file.read_text(encoding="utf-8").splitlines()
+        if not lines or lines[0] != CHECKLIST_HEADER:
+            raise ValueError("Checklist header is invalid")
+        try:
+            steps_index = lines.index("## Steps")
+        except ValueError as exc:
+            raise ValueError("Checklist steps section is missing") from exc
+        plan = []
+        for line in lines[steps_index + 1 :]:
+            if not line:
+                continue
+            match = CHECKLIST_STEP_RE.fullmatch(line)
+            if match is None:
+                raise ValueError("Checklist contains an invalid step")
+            checked, status, step = match.groups()
+            if (status == "completed") != (checked == "x"):
+                raise ValueError("Checklist checkbox does not match its status")
+            plan.append({"step": step, "status": status})
+        return validate_update_plan_arguments({"explanation": None, "plan": plan})[
+            "plan"
+        ]
+
+    def _validate_checklist_target(self) -> None:
+        assert self.checklist_file is not None
+        try:
+            metadata = self.checklist_file.lstat()
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("Checklist path is not a regular file")
+
+    def _checklist_blocker(self) -> str | None:
+        if self.checklist_file is None or not (
+            self.checklist_file.exists() or self.checklist_file.is_symlink()
+        ):
+            return None
+        try:
+            plan = self._read_checklist()
+        except (OSError, UnicodeError, ValueError) as exc:
+            return (
+                f"The active checklist at {self.checklist_file} is invalid: {exc}. "
+                "Rebuild it with UpdatePlan before finishing."
+            )
+        unfinished = [item for item in plan if item["status"] != "completed"]
+        if not unfinished:
+            return None
+        return (
+            f"The active checklist at {self.checklist_file} still has "
+            f"{len(unfinished)} unfinished step(s). Read it, continue the task, and "
+            "call UpdatePlan whenever progress changes."
+        )
+
+    def _checklist_is_complete(self) -> bool:
+        if self.checklist_file is None or not (
+            self.checklist_file.exists() or self.checklist_file.is_symlink()
+        ):
+            return False
+        try:
+            plan = self._read_checklist()
+        except (OSError, UnicodeError, ValueError):
+            return False
+        return bool(plan) and all(item["status"] == "completed" for item in plan)
+
+    def _remove_checklist_file(self) -> None:
+        if self.checklist_file is not None:
+            try:
+                try:
+                    metadata = self.checklist_file.lstat()
+                except FileNotFoundError:
+                    return
+                if not (
+                    stat.S_ISLNK(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)
+                ):
+                    raise ValueError("Checklist path cannot be removed safely")
+                self.checklist_file.unlink()
+            finally:
+                self.context.set_checklist_reminder("")
+
+    def _sync_checklist_reminder(self) -> None:
+        if self.checklist_file is None:
+            self.context.set_checklist_reminder("")
+            return
+        if self.context.mode == "plan":
+            self.context.set_checklist_reminder(
+                f"Plan file: {self.plan_file}. Checklist file: {self.checklist_file}. "
+                "Write the plan, maintain the checklist with UpdatePlan, then call "
+                "ExitPlanMode when both are ready."
+            )
+            return
+        if self.checklist_file.exists() or self.checklist_file.is_symlink():
+            self.context.set_checklist_reminder(
+                f"Active task checklist: {self.checklist_file}. Read it before "
+                "choosing the next work, update it through UpdatePlan whenever "
+                "status changes, and do not finish with pending or in-progress steps."
+            )
+            return
+        self.context.set_checklist_reminder("")
 
     def _startup_compaction(self) -> Generator[AgentEvent, None, None]:
         if self._startup_checked:
@@ -1304,6 +1481,18 @@ def _extract_summary(output: str) -> str:
     if not summary:
         raise RuntimeError("the model returned an empty summary")
     return summary
+
+
+def _render_checklist(explanation: str | None, plan: list[dict[str, str]]) -> str:
+    lines = [CHECKLIST_HEADER]
+    if explanation:
+        lines.extend(("", "## Explanation"))
+        lines.extend(f"> {line}" for line in explanation.splitlines())
+    lines.extend(("", "## Steps"))
+    for item in plan:
+        checked = "x" if item["status"] == "completed" else " "
+        lines.append(f"- [{checked}] `{item['status']}` {item['step']}")
+    return "\n".join(lines) + "\n"
 
 
 def _fork_system_prompt(parent: str, child: str) -> str:

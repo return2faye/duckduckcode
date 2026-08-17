@@ -12,6 +12,10 @@ from typing import Any, Callable, Protocol
 Validator = Callable[[dict[str, Any]], dict[str, Any]]
 SUBAGENT_SLUG_RE = re.compile(r"^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
 MAX_SUBAGENT_SLUG_LENGTH = 48
+MAX_PLAN_ITEMS = 50
+MAX_PLAN_STEP_LENGTH = 500
+MAX_PLAN_EXPLANATION_LENGTH = 2_000
+PLAN_STATUSES = {"pending", "in_progress", "completed"}
 
 
 class QuerySource(str, Enum):
@@ -132,6 +136,44 @@ def create_exit_plan_mode_tool() -> Tool:
             is_error=True,
         ),
         _identity,
+        category="mode",
+    )
+
+
+def create_update_plan_tool() -> Tool:
+    return create_tool(
+        "UpdatePlan",
+        "Replace the current task checklist after planning or whenever progress "
+        "changes. Keep at most one step in progress. Pass an empty plan only when "
+        "the task is cancelled or replaced.",
+        {
+            "type": "object",
+            "properties": {
+                "explanation": {"type": ["string", "null"]},
+                "plan": {
+                    "type": "array",
+                    "maxItems": MAX_PLAN_ITEMS,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": sorted(PLAN_STATUSES),
+                            },
+                        },
+                        "required": ["step", "status"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["explanation", "plan"],
+            "additionalProperties": False,
+        },
+        lambda **_: ToolResult(
+            "UpdatePlan is handled by the main agent.", is_error=True
+        ),
+        validate_update_plan_arguments,
         category="mode",
     )
 
@@ -434,3 +476,51 @@ def validate_load_skill_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(task, str) or not task:
         raise ValueError("LoadSkill failed: 'task' must be a non-empty string.")
     return {"name": name, "task": task}
+
+
+def validate_update_plan_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    if set(arguments) != {"explanation", "plan"}:
+        raise ValueError("UpdatePlan requires exactly 'explanation' and 'plan'.")
+    explanation = arguments["explanation"]
+    if explanation is not None and not isinstance(explanation, str):
+        raise ValueError("UpdatePlan 'explanation' must be a string or null.")
+    explanation = explanation.strip() if explanation else None
+    if explanation is not None and len(explanation) > MAX_PLAN_EXPLANATION_LENGTH:
+        raise ValueError("UpdatePlan 'explanation' is too long.")
+    plan = arguments["plan"]
+    if not isinstance(plan, list) or len(plan) > MAX_PLAN_ITEMS:
+        raise ValueError(
+            f"UpdatePlan 'plan' must contain at most {MAX_PLAN_ITEMS} items."
+        )
+    normalized = []
+    seen: set[str] = set()
+    in_progress = 0
+    for item in plan:
+        if not isinstance(item, dict) or set(item) != {"step", "status"}:
+            raise ValueError(
+                "Each UpdatePlan item requires exactly 'step' and 'status'."
+            )
+        step = item["step"]
+        status = item["status"]
+        if (
+            not isinstance(step, str)
+            or not step.strip()
+            or "\n" in step
+            or "\r" in step
+            or len(step.strip()) > MAX_PLAN_STEP_LENGTH
+        ):
+            raise ValueError(
+                "UpdatePlan steps must be non-empty single lines up to "
+                f"{MAX_PLAN_STEP_LENGTH} characters."
+            )
+        step = step.strip()
+        if step in seen:
+            raise ValueError("UpdatePlan steps must be unique.")
+        if status not in PLAN_STATUSES:
+            raise ValueError("UpdatePlan item has an invalid status.")
+        seen.add(step)
+        in_progress += status == "in_progress"
+        normalized.append({"step": step, "status": status})
+    if in_progress > 1:
+        raise ValueError("UpdatePlan allows at most one in-progress step.")
+    return {"explanation": explanation, "plan": normalized}

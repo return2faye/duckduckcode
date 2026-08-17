@@ -9,6 +9,7 @@ from duckduckcode.tools.tool import (
     ToolResult,
     create_exit_plan_mode_tool,
     create_tool,
+    create_update_plan_tool,
 )
 from duckduckcode.tools.worktree import (
     create_list_worktrees_tool,
@@ -134,6 +135,47 @@ class ToolTest(unittest.TestCase):
         self.assertEqual(tool.name, "ExitPlanMode")
         self.assertEqual(tool.params["properties"], {})
         self.assertTrue(tool.handler().is_error)
+
+    def test_update_plan_tool_validates_and_normalizes_complete_state(self) -> None:
+        tool = create_update_plan_tool()
+
+        normalized = tool.validator(
+            {
+                "explanation": "  Work in order.  ",
+                "plan": [
+                    {"step": "  inspect  ", "status": "completed"},
+                    {"step": "implement", "status": "in_progress"},
+                ],
+            }
+        )
+
+        self.assertEqual(normalized["explanation"], "Work in order.")
+        self.assertEqual(normalized["plan"][0]["step"], "inspect")
+        self.assertTrue(tool.handler().is_error)
+
+    def test_update_plan_rejects_duplicate_or_multiple_active_steps(self) -> None:
+        tool = create_update_plan_tool()
+
+        with self.assertRaisesRegex(ValueError, "unique"):
+            tool.validator(
+                {
+                    "explanation": None,
+                    "plan": [
+                        {"step": "same", "status": "pending"},
+                        {"step": "same", "status": "completed"},
+                    ],
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "at most one"):
+            tool.validator(
+                {
+                    "explanation": None,
+                    "plan": [
+                        {"step": "one", "status": "in_progress"},
+                        {"step": "two", "status": "in_progress"},
+                    ],
+                }
+            )
 
     def test_factory_exposes_metadata_and_model_schema(self) -> None:
         params = {

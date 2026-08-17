@@ -1308,6 +1308,20 @@ class TuiTest(unittest.TestCase):
         self.assertIn(content, tui._display_messages()[0][1])
         self.assertIn("[收起]", tui._display_messages()[0][1])
 
+    def test_update_plan_always_displays_the_complete_checklist(self) -> None:
+        tui = _Tui(object(), "model", "/tmp", object())
+        content = "Checklist updated.\n" + "\n".join(
+            f"- [ ] `pending` step {index}" for index in range(20)
+        )
+        tui.messages = [("tool:plan", "→ UpdatePlan running…")]
+        tui.tool_results["plan"] = ToolResultEvent("plan", "UpdatePlan", content)
+
+        displayed = tui._display_messages()[0][1]
+
+        self.assertIn("- [ ] `pending` step 0", displayed)
+        self.assertIn("- [ ] `pending` step 19", displayed)
+        self.assertNotIn("[查看详情]", displayed)
+
     def test_failed_tool_result_collapses_full_error(self) -> None:
         tui = _Tui(object(), "model", "/tmp", object())
         content = "permission denied\n" + "trace\n" * 20

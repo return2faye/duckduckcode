@@ -86,6 +86,7 @@ class MainTest(unittest.TestCase):
                     "Grep",
                     "Bash",
                     "ExitPlanMode",
+                    "UpdatePlan",
                     "LoadSkill",
                     "Agent",
                     "ListWorktrees",
@@ -99,6 +100,10 @@ class MainTest(unittest.TestCase):
             self.assertEqual(
                 agent.plan_file,
                 workspace.resolve() / ".duckduckcode" / "plan.md",
+            )
+            self.assertEqual(
+                agent.checklist_file,
+                workspace.resolve() / ".duckduckcode" / "checklist.md",
             )
 
     def test_build_agent_can_disable_mcp_for_auxiliary_agents(self) -> None:
@@ -297,8 +302,13 @@ class MainTest(unittest.TestCase):
                 "ExitPlanMode", [schema["name"] for schema in child.tools.schemas()]
             )
             self.assertNotIn(
+                "UpdatePlan", [schema["name"] for schema in child.tools.schemas()]
+            )
+            self.assertNotIn(
                 "LoadSkill", [schema["name"] for schema in child.tools.schemas()]
             )
+            self.assertIsNone(child.plan_file)
+            self.assertIsNone(child.checklist_file)
 
     def test_fork_child_shares_parent_lsp_without_owning_it(self) -> None:
         config_path = Path(self.home.name) / ".duckduckcode" / "lsp.yaml"

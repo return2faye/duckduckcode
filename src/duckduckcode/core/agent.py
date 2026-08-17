@@ -542,27 +542,24 @@ class Agent:
             Message("user", transcript),
         ]
         tools = self.context.tool_schemas()
-        input_tokens = self.context.estimate_request_tokens(messages, tools)
-        max_output_tokens = min(
-            COMPACTION_OUTPUT_TOKENS,
-            self.context.context_window_tokens
-            - input_tokens
-            - self.context.compaction_safety_tokens,
-        )
-        if max_output_tokens < 1:
-            self._compaction_circuit_open = True
-            yield ErrorEvent(
-                "Context compaction cannot fit inside the configured context "
-                "window. Start a new conversation or increase "
-                "CONTEXT_WINDOW_TOKENS.",
-                "context_compaction",
-            )
-            return "error"
+
+        def shrink_request() -> bool:
+            nonlocal cutoff, messages
+            smaller = self.context.compaction_input(cutoff)
+            if smaller is None:
+                return False
+            smaller_transcript, cutoff = smaller
+            messages = [
+                Message("system", COMPACTION_SYSTEM_PROMPT),
+                Message("user", smaller_transcript),
+            ]
+            return True
 
         yield ContextCompactionEvent("started", automatic, before_tokens)
         usage = 0
         last_error: Exception | None = None
-        for _ in range(COMPACTION_MAX_ATTEMPTS):
+        succeeded = False
+        for attempt in range(COMPACTION_MAX_ATTEMPTS):
             input_tokens = self.context.estimate_request_tokens(messages, tools)
             max_output_tokens = min(
                 COMPACTION_OUTPUT_TOKENS,
@@ -572,13 +569,22 @@ class Agent:
             )
             if max_output_tokens < 1:
                 last_error = RuntimeError(
-                    "tool-call feedback exhausted the context window"
+                    "context compaction input exhausted the context window"
                 )
+                if attempt + 1 < COMPACTION_MAX_ATTEMPTS and shrink_request():
+                    continue
+                if attempt + 1 < COMPACTION_MAX_ATTEMPTS:
+                    last_error = RuntimeError(
+                        "context compaction input cannot be reduced without "
+                        "splitting a complete conversation turn"
+                    )
+                    break
                 continue
             output = ""
             completed = False
             attempt_usage = 0
             tool_calls: list[ToolCall] = []
+            context_too_long = False
             try:
                 for event in self.client.stream(
                     messages,
@@ -591,6 +597,7 @@ class Agent:
                     elif isinstance(event, ToolCallEvent):
                         tool_calls.append(event.tool_call)
                     elif isinstance(event, ErrorEvent):
+                        context_too_long = _is_context_length_error(event)
                         raise RuntimeError(event.message)
                     elif isinstance(event, DoneEvent):
                         attempt_usage = event.token_usage
@@ -631,16 +638,30 @@ class Agent:
                     return "error"
                 usage += attempt_usage
                 self._compaction_circuit_open = False
+                succeeded = True
                 break
             except Exception as exc:
                 usage += attempt_usage
                 last_error = exc
-        else:
+                context_too_long = context_too_long or _is_context_length_error(
+                    _error_from_exception(exc)
+                )
+                if (
+                    context_too_long
+                    and attempt + 1 < COMPACTION_MAX_ATTEMPTS
+                    and not shrink_request()
+                ):
+                    last_error = RuntimeError(
+                        f"{exc}; context compaction input cannot be reduced without "
+                        "splitting a complete conversation turn"
+                    )
+                    break
+        if not succeeded:
             self._compaction_circuit_open = True
             if usage:
                 yield UsageEvent(usage)
             yield ErrorEvent(
-                "Context compaction failed after 3 attempts: "
+                f"Context compaction failed after {attempt + 1} attempts: "
                 f"{last_error}. Automatic compaction is disabled until "
                 "/compact is run.",
                 "context_compaction",

@@ -280,8 +280,14 @@ class ContextManager:
     def should_compact(self) -> bool:
         return self.estimated_tokens() >= self.auto_compact_tokens
 
-    def compaction_input(self) -> tuple[str, int] | None:
-        cutoff = self._compaction_cutoff()
+    def compaction_input(
+        self, before_cutoff: int | None = None
+    ) -> tuple[str, int] | None:
+        cutoff = (
+            self._compaction_cutoff()
+            if before_cutoff is None
+            else self._smaller_compaction_cutoff(before_cutoff)
+        )
         if cutoff == 0:
             return None
         return (
@@ -304,20 +310,7 @@ class ContextManager:
         del self._messages[:cutoff]
 
     def _compaction_cutoff(self) -> int:
-        complete_turn_starts = []
-        tool_calls: set[str | None] = set()
-        tool_results: set[str | None] = set()
-        for index, message in enumerate(self._messages):
-            if (
-                message.kind == "message"
-                and message.role == "user"
-                and tool_calls == tool_results
-            ):
-                complete_turn_starts.append(index)
-            elif message.kind == "tool_call":
-                tool_calls.add(message.tool_call_id)
-            elif message.kind == "tool_result":
-                tool_results.add(message.tool_call_id)
+        complete_turn_starts = self._complete_turn_starts()
         if not complete_turn_starts:
             return 0
         cutoff = complete_turn_starts[-1]
@@ -333,6 +326,48 @@ class ContextManager:
             cutoff = start
             retained += turn_size
         return cutoff
+
+    def _smaller_compaction_cutoff(self, cutoff: int) -> int:
+        boundaries = [
+            start for start in self._complete_turn_starts() if 0 < start < cutoff
+        ]
+        if not boundaries:
+            return 0
+        boundaries.append(cutoff)
+        sizes = []
+        start = 0
+        for end in boundaries:
+            sizes.append(
+                _estimate_tokens(
+                    [_message_record(message) for message in self._messages[start:end]]
+                )
+            )
+            start = end
+        target = sum(sizes) * 4 // 5
+        smaller = consumed = 0
+        for end, size in zip(boundaries, sizes, strict=True):
+            if consumed + size > target:
+                break
+            consumed += size
+            smaller = end
+        return smaller
+
+    def _complete_turn_starts(self) -> list[int]:
+        complete_turn_starts = []
+        tool_calls: set[str | None] = set()
+        tool_results: set[str | None] = set()
+        for index, message in enumerate(self._messages):
+            if (
+                message.kind == "message"
+                and message.role == "user"
+                and tool_calls == tool_results
+            ):
+                complete_turn_starts.append(index)
+            elif message.kind == "tool_call":
+                tool_calls.add(message.tool_call_id)
+            elif message.kind == "tool_result":
+                tool_results.add(message.tool_call_id)
+        return complete_turn_starts
 
     def set_mode(self, mode: Literal["default", "plan"]) -> None:
         self.mode = mode

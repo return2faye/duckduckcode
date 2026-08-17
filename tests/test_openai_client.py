@@ -1143,6 +1143,86 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(context.abstraction, "summary")
         self.assertIn(UsageEvent(17), events)
 
+    def test_compaction_shrinks_complete_old_turns_after_context_length_error(
+        self,
+    ) -> None:
+        calls = []
+
+        class Client:
+            def stream(
+                self,
+                messages,
+                tools=None,
+                reasoning=None,
+                max_output_tokens=None,
+            ):
+                calls.append(json.loads(messages[1].content))
+                if len(calls) == 1:
+                    yield ErrorEvent("Prompt too long", "context_length_exceeded")
+                    return
+                yield ConversationEvent("<summary>smaller summary</summary>")
+                yield DoneEvent(3)
+
+        context = ContextManager(
+            system_prompt="system",
+            compaction_target_tokens=1_000,
+        )
+        for index in range(5):
+            context.add_user(f"old request {index} " + "x" * 10_000)
+            context.add_assistant(f"old answer {index}")
+        context.add_user("current request")
+        original = context.messages()
+
+        events = list(Agent(Client(), context).compact())
+
+        self.assertEqual(len(calls), 2)
+        self.assertLess(len(calls[1]["messages"]), len(calls[0]["messages"]))
+        self.assertEqual(context.abstraction, "smaller summary")
+        self.assertEqual(context.messages(), original[len(calls[1]["messages"]) :])
+        self.assertFalse(any(isinstance(event, ErrorEvent) for event in events))
+
+    def test_compaction_circuit_breaks_after_three_shrinking_failures(self) -> None:
+        calls = []
+
+        class Client:
+            def stream(
+                self,
+                messages,
+                tools=None,
+                reasoning=None,
+                max_output_tokens=None,
+            ):
+                calls.append(json.loads(messages[1].content))
+                yield ErrorEvent("Prompt too long", "context_length_exceeded")
+
+        context = ContextManager(
+            system_prompt="system",
+            abstraction="original summary",
+            compaction_target_tokens=1_000,
+        )
+        for index in range(10):
+            context.add_user(f"old request {index} " + "x" * 5_000)
+            context.add_assistant(f"old answer {index}")
+        context.add_user("current request")
+        original = context.messages()
+        agent = Agent(Client(), context)
+
+        events = list(agent.compact())
+
+        self.assertEqual(len(calls), 3)
+        self.assertGreater(len(calls[0]["messages"]), len(calls[1]["messages"]))
+        self.assertGreater(len(calls[1]["messages"]), len(calls[2]["messages"]))
+        self.assertEqual(context.abstraction, "original summary")
+        self.assertEqual(context.messages(), original)
+        self.assertTrue(agent._compaction_circuit_open)
+        self.assertTrue(
+            any(
+                isinstance(event, ErrorEvent)
+                and "failed after 3 attempts" in event.message
+                for event in events
+            )
+        )
+
     def test_stream_compacts_automatically_before_crossing_threshold(self) -> None:
         calls = []
 

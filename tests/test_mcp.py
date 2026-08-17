@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,11 +70,13 @@ class MCPConfigurationTest(unittest.TestCase):
             user.write_text(
                 "files:\n  type: stdio\n  command: user-command\n  args: ['${UNCHANGED}']\n"
                 "remote:\n  type: http\n  url: https://example.com/mcp\n"
-                "  headers:\n    Authorization: 'Bearer ${TOKEN}'\n",
+                "  headers:\n    Authorization: 'Bearer ${TOKEN}'\n"
+                "  concurrency_safe_tools: [search]\n",
                 encoding="utf-8",
             )
             project.write_text(
-                "files:\n  type: stdio\n  command: project-command\n  args: ['.']\n",
+                "files:\n  type: stdio\n  command: project-command\n  args: ['.']\n"
+                "  concurrency_safe_tools: [read_file]\n",
                 encoding="utf-8",
             )
 
@@ -83,18 +84,26 @@ class MCPConfigurationTest(unittest.TestCase):
             servers = loaded.merged(include_project=True)
 
             self.assertEqual(
-                servers["files"], StdioServer("project-command", (".",), {})
+                servers["files"],
+                StdioServer(
+                    "project-command",
+                    (".",),
+                    {},
+                    concurrency_safe_tools=("read_file",),
+                ),
             )
             self.assertEqual(
                 servers["remote"],
                 HTTPServer(
                     "https://example.com/mcp",
                     {"Authorization": "Bearer secret"},
+                    concurrency_safe_tools=("search",),
                 ),
             )
             self.assertEqual(loaded.user_servers["files"].args, ("${UNCHANGED}",))
             self.assertFalse(loaded.project_trusted)
             self.assertNotIn("secret", loaded.project_preview)
+            self.assertIn("read_file", loaded.project_preview)
 
     def test_bad_servers_are_skipped_without_hiding_valid_siblings(self) -> None:
         with (
@@ -110,14 +119,16 @@ class MCPConfigurationTest(unittest.TestCase):
                 "unknown:\n  type: stdio\n  command: python\n  url: https://bad.example\n"
                 "missing:\n  type: http\n  url: https://example.com/mcp\n"
                 "  headers:\n    Authorization: '${MISSING}'\n"
-                "bad_url:\n  type: http\n  url: file:///tmp/socket\n",
+                "bad_url:\n  type: http\n  url: file:///tmp/socket\n"
+                "bad_concurrency:\n  type: stdio\n  command: python\n"
+                "  concurrency_safe_tools: echo\n",
                 encoding="utf-8",
             )
 
             loaded = load_mcp_configuration(workspace, {}, home=home)
 
             self.assertEqual(set(loaded.user_servers), {"good"})
-            self.assertEqual(len(loaded.warnings), 3)
+            self.assertEqual(len(loaded.warnings), 4)
             self.assertNotIn("Authorization", "\n".join(loaded.warnings))
 
     def test_rejects_duplicate_yaml_fields_symlinks_and_large_files(self) -> None:
@@ -218,7 +229,8 @@ class MCPToolAdapterTest(unittest.TestCase):
                 "  type: stdio\n"
                 f"  command: {json.dumps(sys.executable)}\n"
                 "  args: [server.py]\n"
-                "  env:\n    MCP_TEST_TOKEN: configured\n",
+                "  env:\n    MCP_TEST_TOKEN: configured\n"
+                "  concurrency_safe_tools: [echo]\n",
                 encoding="utf-8",
             )
             tools = ToolManager()
@@ -245,12 +257,36 @@ class MCPToolAdapterTest(unittest.TestCase):
                     {"value": "fast", "delay": 0},
                 ),
             ]
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                outcomes = list(executor.map(tools.execute, calls))
+            completed = list(tools.execute_many(calls))
             paired = {
                 call.call_id: json.loads(outcome.content)["structuredContent"]["value"]
-                for call, outcome in zip(calls, outcomes)
+                for call, outcome in completed
             }
+            context = ContextManager(tool_result_directory=workspace / "tool-results")
+            compacted = context.compact_tool_results(
+                list(
+                    tools.execute_many(
+                        [
+                            ToolCall(
+                                "large-1",
+                                "mcp__test__echo",
+                                {"value": "a" * 35000},
+                            ),
+                            ToolCall(
+                                "large-2",
+                                "mcp__test__echo",
+                                {"value": "b" * 35000},
+                            ),
+                        ]
+                    )
+                )
+            )
+            stored = [
+                outcome
+                for _, outcome in compacted
+                if "Tool result stored on disk." in outcome.content
+            ]
+            context.close()
             manager.close()
             manager.close()
 
@@ -262,6 +298,9 @@ class MCPToolAdapterTest(unittest.TestCase):
                 {"value": "quack", "token": "configured"},
             )
             self.assertEqual(paired, {"slow": "slow", "fast": "fast"})
+            self.assertEqual([call.call_id for call, _ in completed], ["fast", "slow"])
+            self.assertEqual(len(stored), 1)
+            self.assertTrue(manager.mcp_tools()[0].is_concurrency_safe)
             self.assertFalse(manager._thread.is_alive())
 
     def test_failed_and_timed_out_servers_do_not_hide_ready_siblings(self) -> None:
@@ -415,6 +454,22 @@ class MCPToolAdapterTest(unittest.TestCase):
         self.assertEqual(payload["structuredContent"], {"count": 1})
         self.assertTrue(payload["isError"])
         self.assertTrue(actual.is_error)
+
+    def test_configured_concurrency_safe_tool_is_explicit_and_checked(self) -> None:
+        tools = ToolManager()
+        manager = MCPManager(Path.cwd(), {}, tools, home=Path("/nonexistent"))
+        remote = SimpleNamespace(name="search", description="", inputSchema={})
+
+        warnings = manager.register_discovered(
+            "docs",
+            object(),
+            [remote],
+            concurrency_safe_tools=("search", "missing"),
+        )
+
+        self.assertTrue(manager.mcp_tools()[0].is_concurrency_safe)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("missing", warnings[0])
 
     def test_mcp_tools_are_cataloged_in_order_but_not_eagerly_registered(self) -> None:
         tools = ToolManager()

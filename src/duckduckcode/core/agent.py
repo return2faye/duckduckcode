@@ -26,6 +26,7 @@ from .event import (
     PermissionRequestEvent,
     PlanReviewEvent,
     PlanReviewResponse,
+    ReasoningEvent,
     SessionListEvent,
     SessionStateEvent,
     SkillListEvent,
@@ -324,6 +325,10 @@ class Agent:
                                         assistant_index, event.delta
                                     )
                                     yield event
+                                elif isinstance(event, ReasoningEvent):
+                                    self.context.append_assistant_reasoning_delta(
+                                        assistant_index, event.delta
+                                    )
                                 elif isinstance(event, ToolCallEvent):
                                     tool_calls.append(event.tool_call)
                                     yield event

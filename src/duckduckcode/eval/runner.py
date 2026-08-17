@@ -242,9 +242,7 @@ def _run_case(config: Config, case: BenchCase, batch_id: str) -> dict[str, Any]:
         status = "judge_error"
         reason = f"Judge error: {exc}"
         errors.append(reason)
-    passed = bool(
-        completed and not validation_errors and score is not None and score >= 3
-    )
+    passed = bool(completed and not validation_errors and score == 4)
     return {
         "batch_id": batch_id,
         "case_id": case.id,

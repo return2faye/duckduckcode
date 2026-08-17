@@ -946,7 +946,7 @@ class AgentTest(unittest.TestCase):
         self.assertIn(
             "Never replace required values with ranges", COMPACTION_SYSTEM_PROMPT
         )
-        self.assertIn("Preserve each key=value record", COMPACTION_SYSTEM_PROMPT)
+        self.assertIn("Treat every key=value record", COMPACTION_SYSTEM_PROMPT)
         self.assertIn(
             "Apply state transitions chronologically", COMPACTION_SYSTEM_PROMPT
         )

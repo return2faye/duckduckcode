@@ -189,7 +189,7 @@ def run_inference(
             "dataset": dataset_name,
             "dataset_split": split if dataset_revision else None,
             "dataset_revision": dataset_revision,
-            "completed": completed,
+            "agent_completed": completed,
             "errors": errors,
             "final_answer": answer,
             "tool_events": tool_events,

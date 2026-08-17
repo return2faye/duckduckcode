@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -36,6 +36,7 @@ class Message:
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_arguments: dict[str, Any] | None = None
+    reasoning_content: str = ""
 
     @classmethod
     def tool_call(cls, call_id: str, name: str, arguments: dict[str, Any]) -> Message:
@@ -145,6 +146,13 @@ class ContextManager:
             message.tool_call_id,
             message.tool_name,
             message.tool_arguments,
+            message.reasoning_content,
+        )
+
+    def append_assistant_reasoning_delta(self, index: int, delta: str) -> None:
+        message = self._messages[index]
+        self._messages[index] = replace(
+            message, reasoning_content=message.reasoning_content + delta
         )
 
     def finish_assistant_stream(self, index: int, token_usage: int = 0) -> None:
@@ -172,6 +180,7 @@ class ContextManager:
             message.tool_call_id,
             message.tool_name,
             message.tool_arguments,
+            message.reasoning_content,
         )
 
     def add_tool_call(self, tool_call: ToolCall) -> None:
@@ -263,7 +272,7 @@ class ContextManager:
     ) -> int:
         return _estimate_tokens(
             {
-                "messages": [message.to_openai() for message in messages],
+                "messages": [_estimated_message(message) for message in messages],
                 "tools": tools or [],
             }
         )
@@ -476,6 +485,13 @@ def _preview(content: str) -> tuple[str, str]:
 def _estimate_tokens(value: Any) -> int:
     encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
     return (len(encoded) + 2) // 3
+
+
+def _estimated_message(message: Message) -> dict[str, Any]:
+    value = message.to_openai()
+    if message.reasoning_content:
+        value["reasoning_content"] = message.reasoning_content
+    return value
 
 
 def _message_record(message: Message) -> dict[str, Any]:

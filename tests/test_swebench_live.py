@@ -187,7 +187,7 @@ class SwebenchLiveTest(unittest.TestCase):
                 "owner__project-1"
             ]
             self.assertEqual(code, 0)
-            self.assertTrue(result["completed"])
+            self.assertTrue(result["agent_completed"])
             self.assertIn("diff --git a/bug.py b/bug.py", result["model_patch"])
             self.assertIn("diff --git a/new.bin b/new.bin", result["model_patch"])
             self.assertNotIn(".duckduckcode", result["model_patch"])

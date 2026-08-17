@@ -62,6 +62,7 @@ class StdioServer:
     args: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
     type: str = "stdio"
+    concurrency_safe_tools: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class HTTPServer:
     url: str
     headers: Mapping[str, str] = field(default_factory=dict)
     type: str = "http"
+    concurrency_safe_tools: tuple[str, ...] = ()
 
 
 Server = StdioServer | HTTPServer
@@ -290,7 +292,7 @@ def _parse_server(name: str, value: object, environment: Mapping[str, str]) -> S
         raise TypeError("configuration must be a mapping")
     server_type = value.get("type")
     if server_type == "stdio":
-        allowed = {"type", "command", "args", "env"}
+        allowed = {"type", "command", "args", "env", "concurrency_safe_tools"}
         _reject_unknown(value, allowed)
         command = value.get("command")
         args = value.get("args", [])
@@ -299,9 +301,16 @@ def _parse_server(name: str, value: object, environment: Mapping[str, str]) -> S
             raise ValueError("command must be a non-empty string")
         if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
             raise ValueError("args must be a list of strings")
-        return StdioServer(command, tuple(args), _expand_mapping(env, environment))
+        return StdioServer(
+            command,
+            tuple(args),
+            _expand_mapping(env, environment),
+            concurrency_safe_tools=_parse_tool_names(
+                value.get("concurrency_safe_tools", [])
+            ),
+        )
     if server_type == "http":
-        allowed = {"type", "url", "headers"}
+        allowed = {"type", "url", "headers", "concurrency_safe_tools"}
         _reject_unknown(value, allowed)
         url = value.get("url")
         if not isinstance(url, str):
@@ -314,7 +323,13 @@ def _parse_server(name: str, value: object, environment: Mapping[str, str]) -> S
             or parsed.password is not None
         ):
             raise ValueError("url must be an HTTP(S) URL")
-        return HTTPServer(url, _expand_mapping(value.get("headers", {}), environment))
+        return HTTPServer(
+            url,
+            _expand_mapping(value.get("headers", {}), environment),
+            concurrency_safe_tools=_parse_tool_names(
+                value.get("concurrency_safe_tools", [])
+            ),
+        )
     raise ValueError("type must be 'stdio' or 'http'")
 
 
@@ -322,6 +337,17 @@ def _reject_unknown(value: dict[object, object], allowed: set[str]) -> None:
     unknown = sorted(str(key) for key in value if key not in allowed)
     if unknown:
         raise ValueError("unknown field(s): " + ", ".join(unknown))
+
+
+def _parse_tool_names(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(name, str)
+        or len(name) > 64
+        or _TOOL_NAME.fullmatch(name) is None
+        for name in value
+    ):
+        raise ValueError("concurrency_safe_tools must be a list of valid tool names")
+    return tuple(dict.fromkeys(value))
 
 
 def _expand_mapping(value: object, environment: Mapping[str, str]) -> dict[str, str]:
@@ -360,16 +386,17 @@ def _preview(servers: Mapping[str, Server]) -> str:
     preview = []
     for name, server in servers.items():
         if isinstance(server, StdioServer):
-            preview.append(
-                {
-                    "server": name,
-                    "transport": "stdio",
-                    "command": server.command,
-                    "args": list(server.args),
-                }
-            )
+            item = {
+                "server": name,
+                "transport": "stdio",
+                "command": server.command,
+                "args": list(server.args),
+            }
         else:
-            preview.append({"server": name, "transport": "http", "url": server.url})
+            item = {"server": name, "transport": "http", "url": server.url}
+        if server.concurrency_safe_tools:
+            item["concurrency_safe_tools"] = list(server.concurrency_safe_tools)
+        preview.append(item)
     return json.dumps(preview, ensure_ascii=False, indent=2)
 
 
@@ -520,7 +547,12 @@ class MCPManager:
                 warnings.append(f"MCP server '{state.name}' failed: {state.error}")
             elif state.session is not None:
                 warnings.extend(
-                    self.register_discovered(state.name, state.session, state.tools)
+                    self.register_discovered(
+                        state.name,
+                        state.session,
+                        state.tools,
+                        concurrency_safe_tools=state.server.concurrency_safe_tools,
+                    )
                 )
         return warnings
 
@@ -629,12 +661,20 @@ class MCPManager:
                 return tools
 
     def register_discovered(
-        self, server_name: str, session: object, discovered: Sequence[Any]
+        self,
+        server_name: str,
+        session: object,
+        discovered: Sequence[Any],
+        *,
+        concurrency_safe_tools: Sequence[str] = (),
     ) -> list[str]:
         warnings: list[str] = []
+        concurrency_safe = set(concurrency_safe_tools)
+        discovered_names: set[str] = set()
 
         for remote in discovered:
             remote_name = getattr(remote, "name", "")
+            discovered_names.add(remote_name)
             name = f"mcp__{server_name}__{remote_name}"
             schema = getattr(remote, "inputSchema", None)
             if len(name) > 64 or _TOOL_NAME.fullmatch(name) is None:
@@ -656,8 +696,18 @@ class MCPManager:
                 )
                 continue
 
-            tool = MCPTool(server_name, remote, partial(self._call_tool, session))
+            tool = MCPTool(
+                server_name,
+                remote,
+                partial(self._call_tool, session),
+                is_concurrency_safe=remote_name in concurrency_safe,
+            )
             self._mcp_tools.append(tool)
+        for name in sorted(concurrency_safe - discovered_names):
+            warnings.append(
+                f"MCP server '{server_name}' did not expose configured "
+                f"concurrency-safe tool '{name}'."
+            )
         if self._mcp_tools:
             warning = self._ensure_load_tool()
             if warning is not None:

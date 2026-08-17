@@ -4,7 +4,13 @@ import json
 from collections.abc import Iterable, Iterator
 from typing import Any
 
-from ...core.event import ConversationEvent, DoneEvent, StreamEvent, ToolCallEvent
+from ...core.event import (
+    ConversationEvent,
+    DoneEvent,
+    ReasoningEvent,
+    StreamEvent,
+    ToolCallEvent,
+)
 from ...tools.tool import ToolCall
 
 
@@ -20,6 +26,9 @@ class DeepSeekStreamEventHandler:
                 if not choices:
                     continue
                 delta = getattr(choices[0], "delta", None)
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    yield ReasoningEvent(reasoning)
                 content = getattr(delta, "content", None)
                 if content:
                     yield ConversationEvent(content)

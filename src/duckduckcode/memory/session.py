@@ -277,6 +277,11 @@ class SessionManager:
                 "status": status,
                 "token_usage": token_usage if status == "completed" else 0,
                 "visible": True,
+                **(
+                    {"reasoning_content": message.reasoning_content}
+                    if message.reasoning_content
+                    else {}
+                ),
             },
             self._timestamp(),
         )
@@ -350,6 +355,7 @@ class SessionManager:
                         value["content"],
                         status=value["status"],
                         token_usage=value["token_usage"],
+                        reasoning_content=value.get("reasoning_content", ""),
                     )
                 )
             elif kind == "tool_call":
@@ -505,7 +511,10 @@ def _parse_record(value: Any, line_number: int) -> SessionRecord:
         "tool_result": {"type", "call_id", "name", "content", "is_error"},
         "compaction": {"type", "summary", "cutoff", "token_usage"},
     }
-    if kind not in fields or set(context) != fields[kind]:
+    message_fields = fields["message"]
+    if kind == "message" and set(context) == message_fields | {"reasoning_content"}:
+        pass
+    elif kind not in fields or set(context) != fields[kind]:
         raise ValueError(f"line {line_number} has invalid {kind!r} fields")
     if kind == "message":
         if (
@@ -515,6 +524,8 @@ def _parse_record(value: Any, line_number: int) -> SessionRecord:
             or not _integer(context["token_usage"])
             or context["token_usage"] < 0
             or not isinstance(context["visible"], bool)
+            or not isinstance(context.get("reasoning_content", ""), str)
+            or ("reasoning_content" in context and role != "assistant")
         ):
             raise ValueError(f"line {line_number} has an invalid message")
     elif kind == "tool_call":

@@ -92,7 +92,8 @@ entry replacing the complete user entry that has the same server name:
 2. `<workspace>/.duckduckcode/mcp.yaml`
 
 The root is a server map. Stdio servers accept only `type`, `command`, `args`,
-and `env`; Streamable HTTP servers accept only `type`, `url`, and `headers`:
+`env`, and `concurrency_safe_tools`; Streamable HTTP servers accept only `type`,
+`url`, `headers`, and `concurrency_safe_tools`:
 
 ```yaml
 files:
@@ -101,6 +102,7 @@ files:
   args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
   env:
     TOKEN: "${FILES_TOKEN}"
+  concurrency_safe_tools: [read_file]
 
 remote:
   type: http
@@ -143,6 +145,14 @@ stop other servers and is not recreated by DuckDuckCode. The SDK remains
 responsible for protocol-level SSE resumption inside a live Streamable HTTP
 session. Sessions, HTTP clients, and stdio processes remain open until the
 Agent closes.
+
+MCP tools execute serially by default. `concurrency_safe_tools` is an optional
+list of exact remote tool names that the user has verified can run concurrently;
+unknown names produce a startup warning. DuckDuckCode does not infer this from
+MCP annotations because the protocol has no concurrency-safety contract and
+annotations are untrusted hints. Large-result storage is calculated across all
+results from one model turn, independently of whether those calls ran in
+parallel.
 
 The first MCP release intentionally omits prompts, sampling, OAuth, health
 checks, manager-level automatic reconnect, configuration hot reload, and

@@ -12,6 +12,11 @@ class ConversationEvent:
 
 
 @dataclass(frozen=True)
+class ReasoningEvent:
+    delta: str
+
+
+@dataclass(frozen=True)
 class ToolCallEvent:
     tool_call: ToolCall
 
@@ -127,7 +132,9 @@ class SkillListEvent:
     skills: tuple[dict[str, Any], ...]
 
 
-StreamEvent = ConversationEvent | ToolCallEvent | ErrorEvent | DoneEvent
+StreamEvent = (
+    ConversationEvent | ReasoningEvent | ToolCallEvent | ErrorEvent | DoneEvent
+)
 AgentEvent = (
     ConversationEvent
     | ToolCallEvent

@@ -5,8 +5,15 @@ import unittest
 from unittest.mock import patch
 
 from duckduckcode.config import Config, ModelConfig
-from duckduckcode.core.context import Message, ReasoningConfig
-from duckduckcode.core.event import ConversationEvent, DoneEvent, ToolCallEvent
+from duckduckcode.core.agent import Agent
+from duckduckcode.core.context import ContextManager, Message, ReasoningConfig
+from duckduckcode.core.event import (
+    ConversationEvent,
+    DoneEvent,
+    LoopCompleteEvent,
+    ReasoningEvent,
+    ToolCallEvent,
+)
 from duckduckcode.providers import create_client
 from duckduckcode.providers.deepseek.client import DeepSeekClient
 from duckduckcode.providers.deepseek.serialize import (
@@ -14,7 +21,7 @@ from duckduckcode.providers.deepseek.serialize import (
     serialize_tools,
 )
 from duckduckcode.providers.deepseek.stream import DeepSeekStreamEventHandler
-from duckduckcode.tools.tool import ToolCall
+from duckduckcode.tools.tool import ToolCall, ToolManager
 
 
 def chunk(*, content=None, reasoning_content=None, tool_calls=None, usage=None):
@@ -52,7 +59,11 @@ class DeepSeekSerializerTest(unittest.TestCase):
         messages = [
             Message("system", "system prompt"),
             Message("user", "inspect"),
-            Message("assistant", "I will inspect."),
+            Message(
+                "assistant",
+                "I will inspect.",
+                reasoning_content="I should inspect both files.",
+            ),
             Message.tool_call("call_1", "ReadFile", {"path": "README.md"}),
             Message.tool_call("call_2", "Glob", {"pattern": "*.py"}),
             Message.tool_result("call_1", "read output"),
@@ -68,6 +79,7 @@ class DeepSeekSerializerTest(unittest.TestCase):
                 {
                     "role": "assistant",
                     "content": "I will inspect.",
+                    "reasoning_content": "I should inspect both files.",
                     "tool_calls": [
                         {
                             "id": "call_1",
@@ -135,7 +147,7 @@ class DeepSeekSerializerTest(unittest.TestCase):
 
 
 class DeepSeekStreamTest(unittest.TestCase):
-    def test_emits_content_fragmented_tool_calls_and_usage_without_reasoning(
+    def test_emits_content_reasoning_fragmented_tool_calls_and_usage(
         self,
     ) -> None:
         events = Events(
@@ -168,6 +180,7 @@ class DeepSeekStreamTest(unittest.TestCase):
         self.assertEqual(
             list(DeepSeekStreamEventHandler().handle(events)),
             [
+                ReasoningEvent("private reasoning"),
                 ConversationEvent("hel"),
                 ConversationEvent("lo"),
                 ToolCallEvent(
@@ -184,6 +197,49 @@ class DeepSeekStreamTest(unittest.TestCase):
 
 
 class DeepSeekClientTest(unittest.TestCase):
+    def test_agent_replays_reasoning_with_tool_call_on_next_request(self) -> None:
+        class Client:
+            def __init__(self):
+                self.requests = []
+
+            def stream(self, messages, tools=None, reasoning=None):
+                self.requests.append(DeepSeekChatSerializer().serialize(messages))
+                if len(self.requests) == 1:
+                    yield ReasoningEvent("inspect before answering")
+                    yield ToolCallEvent(ToolCall("call_1", "Echo", {}))
+                else:
+                    yield ConversationEvent("done")
+                yield DoneEvent()
+
+            def close(self):
+                pass
+
+        client = Client()
+        tools = ToolManager()
+        tools.register(
+            "Echo",
+            "Echo",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda: "ok",
+            is_read_only=True,
+        )
+        agent = Agent(
+            client,
+            ContextManager(system_prompt="system"),
+            tools,
+            max_iterations=2,
+        )
+
+        events = list(agent.stream("inspect"))
+
+        self.assertEqual(events[-1], LoopCompleteEvent("completed", 2))
+        assistant = next(
+            item
+            for item in client.requests[1]
+            if item.get("role") == "assistant" and "tool_calls" in item
+        )
+        self.assertEqual(assistant["reasoning_content"], "inspect before answering")
+
     def test_factory_selects_the_configured_provider(self) -> None:
         config = Config(
             "openai-key",

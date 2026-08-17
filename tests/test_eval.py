@@ -338,8 +338,8 @@ class EvalRunTest(unittest.TestCase):
                 .fetchall()
             )
 
-        self.assertEqual(exit_1.exception.code, 0)
-        self.assertEqual(exit_2.exception.code, 0)
+        self.assertEqual(exit_1.exception.code, 1)
+        self.assertEqual(exit_2.exception.code, 1)
         self.assertEqual(decisions, ["allow_once", "deny"] * 4)
         self.assertEqual(len(set(workspaces)), 2)
         self.assertTrue(all(not workspace.exists() for workspace in workspaces))
@@ -353,7 +353,7 @@ class EvalRunTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(
             rows[0][:4],
-            ("completed", 3, 1, "fixed:Check it once more"),
+            ("completed", 3, 0, "fixed:Check it once more"),
         )
         self.assertIn("-old", rows[0][4])
         self.assertIn("+new", rows[0][4])
@@ -369,7 +369,7 @@ class EvalRunTest(unittest.TestCase):
         )
         self.assertEqual(evidence[0]["tool_events"][2]["content"], "ok")
         self.assertTrue(evidence[0]["tool_errors"][0]["is_error"])
-        self.assertIn("1/1 passed", output.getvalue())
+        self.assertIn("0/1 passed", output.getvalue())
 
     def test_incomplete_and_file_violation_force_failure_and_judge_error_is_saved(
         self,

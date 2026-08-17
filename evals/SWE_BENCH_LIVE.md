@@ -2,8 +2,8 @@
 
 ## 结论
 
-审查日期：2026-08-09。DuckDuckCode 基线 commit 为 `9d7c5a9`，测评模型为
-`o4-mini`、reasoning effort 为 `low`。SWE-bench Live 参考实现固定到
+审查日期：2026-08-09。流水线初始基线 commit 为 `9d7c5a9`，最初使用 `o4-mini`；
+当前复测 Agent 为 `deepseek-v4-pro`。SWE-bench Live 参考实现固定到
 [`70ec57e`](https://github.com/microsoft/SWE-bench-Live/tree/70ec57e852e3f2d195790fe71f553e272c691833)。
 
 主测评题唯一来源是 Microsoft 发布在 Hugging Face 的
@@ -16,10 +16,11 @@
 本轮得到三个可复现结论：
 
 1. 原有 4 个上下文用例为 4/4，但它们没有覆盖“小输出预算下的大量不透明原子事实”。新增的精确探针发现旧摘要模板只保留 2/20 个事实，信息保留率为 10%。
-2. 根因是模板强制先生成与摘要重复的 `<analysis>`，并允许用范围或省略号概括独立值。改成单一 `<summary>`、事实优先和禁止省略后，同模型、同 800-token 输出预算保留 20/20，达到 100%；原有上下文套件复测仍为 4/4。
+2. 根因包括模板强制生成不持久化的重复 `<analysis>`、允许范围或省略号概括独立值，以及 DeepSeek thinking 消耗摘要输出预算。改成单一 `<summary>`、关闭 compaction thinking、事实优先并禁止省略后，20 个原子事实在三次复测中均为 20/20；完整 41-marker 测试三次平均为 95.9%，最差 92.7%。
 3. SWE-bench Live 真实实例暴露了 Agent 的完成质量问题：修复流水线后能定位并产出可应用、语法合法的 patch，但没有运行测试，而且修改范围与 gold patch 的通用校验器修复不同。没有运行官方 Docker evaluator，因此不能声称该实例 resolved。
 
-10% → 100% 是各一次固定配置的真实 API 探针结果，不是多次采样的置信区间，也不代表所有上下文分布。
+原子事实 10% → 100% 来自固定配置的真实 API 探针；完整测试的修复后数字按三次采样
+报告平均和最差值，但仍不是统计置信区间，也不代表所有上下文分布。
 
 ## 流水线
 
@@ -31,7 +32,7 @@
 2. 从显式 repository cache 创建临时 Git checkout；只有传入 `--clone-missing` 才访问 GitHub，且设置 `GIT_TERMINAL_PROMPT=0`。
 3. 关闭 session、memory、skills、subagent、MCP 和 LSP，在隔离工作区运行主 Agent。
 4. 生成 binary/full-index patch，排除运行期 `.duckduckcode` 文件，原子写入官方要求的 prediction object。
-5. 保存 final answer、tool trace、错误、token 与 compaction 数，便于解释空 patch、工具失败和提前结束。已有 prediction 默认跳过，可用 `--overwrite` 重跑。
+5. 保存 final answer、tool trace、错误、token、compaction 数和 `agent_completed`，便于解释空 patch、工具失败和提前结束；该字段只表示 Agent 循环正常结束，不代表官方 `resolved`。已有 prediction 默认跳过，可用 `--overwrite` 重跑。
 
 ```bash
 uv run duckduckcode-swebench-live \
@@ -81,13 +82,13 @@ uv run duckduckcode-eval --bench evals/benches/context
 
 | 项目 | 修改前 | 修改后 |
 | --- | ---: | ---: |
-| 原子事实 | 2/20 | 20/20 |
-| 精确信息保留率 | 10% | 100% |
+| 原子事实 | 2/20 | 三次均为 20/20 |
+| 完整 41-marker 探针 | 28/41（68.3%） | 118/123（平均 95.9%，最差 92.7%） |
 | pending state | 保留 | 保留 |
 | 完整 summary 标签 | 是 | 是 |
-| 既有 context suite | 4/4 | 4/4 |
+| context suite | o4-mini 4/4 | DeepSeek 严格 Judge 4/4 |
 
-旧输出把 20 个独立事实写成 `FACT-01 … FACT-20`，因此只有首尾两个字符串精确命中；同时先输出了一整段重复 `<analysis>`。新输出逐条写出 20 个事实，且没有重复分析段。
+旧输出把 20 个独立事实写成 `FACT-01 … FACT-20`，因此只有首尾两个字符串精确命中；同时先输出了一整段重复 `<analysis>`。新输出逐条写出 20 个事实，且没有重复分析段。完整探针仍会随机把少量 `key=value` 改写为自然语言，因此不声称稳定 100%。
 
 ### 修复
 
@@ -108,7 +109,7 @@ uv run duckduckcode-eval --bench evals/benches/context
 | `aws-cloudformation__cfn-lint-3798` | 30 轮上限，未完成 | 2,109 bytes | 472,576 | 97 | patch 可 `git apply --check`；修改 2 个源码文件和 1 个测试文件；未官方评分 |
 | `python-babel__babel-1141` | 人工停止 | 1,065 bytes | 80,538 | 28 | patch 可 `git apply --check`；只修改 `babel/dates.py`；未官方评分 |
 
-结论：局部推理链路和 DeepSeek tool calling 可以运行并产生可应用 patch，但首题在 30 轮内没有自行结束，成本远高于预期。[DeepSeek 官方要求](https://api-docs.deepseek.com/guides/thinking_mode) thinking 模式下的 tool-call `reasoning_content` 在后续请求中回传，而当前 provider stream/message 层没有持久化该字段；这是一项需要优先核查的协议缺口，但本轮数据还不能单独证明它就是长循环的全部原因。下一批前还应统计重复搜索、重复验证和“已经有 patch 仍继续调用工具”的停止条件；不能把 `completed=false` 或 `git apply --check` 误报为 resolved。
+结论：局部推理链路和 DeepSeek tool calling 可以运行并产生可应用 patch，但首题在 30 轮内没有自行结束，成本远高于预期。[DeepSeek 官方要求](https://api-docs.deepseek.com/guides/thinking_mode) thinking 模式下的 tool-call `reasoning_content` 在后续请求中回传；原 provider stream/message 层会丢弃该字段。现已将它作为隐藏 reasoning event 保存在 assistant message，并在工具调用序列化、session 持久化与恢复中完整回传；真实两轮 ReadFile smoke 正常完成。该协议缺口是成本数据的污染因素，但没有重跑同一 SWE 实例，不能声称它就是长循环的全部原因。下一批仍需统计重复搜索、重复验证和“已经有 patch 仍继续调用工具”的停止条件；不能把 `agent_completed=false` 或 `git apply --check` 误报为 resolved。
 
 实例：`aws-cloudformation__cfn-lint-3798`，base commit
 `d5c3da9efaa4bbd1d24fa768752df3da343b1d33`，来自官方 Python `lite` split。
@@ -146,7 +147,7 @@ uv run duckduckcode-eval --bench evals/benches/context
 | 优先级 | 问题 | 修改方案 | 验收标准 |
 | --- | --- | --- | --- |
 | P0 | Agent 可在源码已修改但没有成功验证时结束 | 在 Agent loop 记录本任务是否发生源码写入、此后是否有成功 Bash 验证；首次准备结束但未验证时注入一次提醒并继续，不猜测具体测试命令 | SWE-bench trace 中任何有源码 patch 的 completed run 至少有一次写入后的成功验证；无可运行测试时 final answer 明确说明未验证 |
-| P0 | 当前 SWE adapter 的 `completed` 只代表循环结束，容易被误读为 resolved | 输出字段改名或增加 `agent_completed`，文档和报告始终把官方 `resolved` 单列 | prediction metadata 不出现未经官方 evaluator 支持的通过结论 |
+| 已修复 | SWE adapter 的 `completed` 容易被误读为 resolved | 字段改为 `agent_completed`；文档和报告始终把官方 `resolved` 单列 | prediction metadata 不出现未经官方 evaluator 支持的通过结论 |
 | P1 | ReadFile/编辑协议仍依赖模型理解显示行号 | Eval 继续统计“把行号复制进 EditFile”的失败；若提示仍复现，再考虑给 EditFile 增加显式 line-range API，而不是模糊剥离数字 | 连续 SWE-bench sample 中该类错误为 0 |
 | P1 | 单实例 89k–155k tokens，搜索和失败编辑成本高 | 报告每实例 tool error、重复搜索和 token；先用 10–20 个 lite 实例量化，再决定是否增加只读停滞保护 | 每实例有成本分布，优化由数据触发 |
 | P1 | 尚无官方 Docker score | 先运行 gold patch 三次筛出本机稳定实例，再批量评估 prediction | 保存官方 report.json，并报告 resolved/有效 gold 分母 |

@@ -94,6 +94,20 @@ class SessionManagerTest(unittest.TestCase):
         self.assertEqual(context.abstraction, "summary")
         self.assertEqual(context.messages(), [Message("user", "current")])
 
+    def test_replay_preserves_reasoning_needed_by_tool_calls(self) -> None:
+        manager = self.manager()
+        snapshot = manager.start()
+        index = manager.context.start_assistant_stream()
+        manager.context.append_assistant_reasoning_delta(index, "private reasoning")
+        manager.commit_assistant_stream(index, "completed")
+        manager.commit_tool_call(ToolCall("call_1", "ReadFile", {"path": "README.md"}))
+        manager.commit_tool_result(ToolCall("call_1", "ReadFile", {}), ToolResult("ok"))
+
+        context = ContextManager(system_prompt="system")
+        self.manager(context).resume(snapshot.session_id)
+
+        self.assertEqual(context.messages()[0].reasoning_content, "private reasoning")
+
     def test_missing_tool_result_is_repaired_without_advancing_activity(self) -> None:
         manager = self.manager()
         snapshot = manager.start()

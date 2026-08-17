@@ -18,6 +18,7 @@ __pycache__/
 /.duckduckcode/swebench-*.json
 /.duckduckcode/sessions/
 /.duckduckcode/worktrees.json
+/evals/EVALUATION_DRIVEN_OPTIMIZATION.md
 /docs/
 dist/
 *.egg-info/

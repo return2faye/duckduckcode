@@ -28,15 +28,19 @@ class DeepSeekChatSerializer:
                     )
                     index += 1
                 content = None
+                reasoning_content = ""
                 if (
                     serialized
                     and serialized[-1].get("role") == "assistant"
                     and "tool_calls" not in serialized[-1]
                 ):
-                    content = serialized.pop()["content"] or None
-                serialized.append(
-                    {"role": "assistant", "content": content, "tool_calls": calls}
-                )
+                    assistant = serialized.pop()
+                    content = assistant["content"] or None
+                    reasoning_content = assistant.get("reasoning_content", "")
+                value = {"role": "assistant", "content": content, "tool_calls": calls}
+                if reasoning_content:
+                    value["reasoning_content"] = reasoning_content
+                serialized.append(value)
                 continue
             if message.kind == "tool_result":
                 serialized.append(
@@ -47,7 +51,10 @@ class DeepSeekChatSerializer:
                     }
                 )
             else:
-                serialized.append({"role": message.role, "content": message.content})
+                value = {"role": message.role, "content": message.content}
+                if message.reasoning_content:
+                    value["reasoning_content"] = message.reasoning_content
+                serialized.append(value)
             index += 1
         return serialized
 

@@ -38,8 +38,19 @@ calls to the `LANGSMITH_PROJECT` project.
 
 ## Chat
 
+Install the command once from this repository (editable installs pick up local
+code changes without reinstalling):
+
 ```bash
-uv run duckduckcode
+uv tool install --editable .
+```
+
+Then start DuckDuckCode from any directory. That directory becomes the
+workspace:
+
+```bash
+cd /path/to/project
+duckduckcode
 ```
 
 DuckDuckCode starts the TUI by default. The upper area shows the duck banner, version, working directory, and chat history. The lower input area accepts prompts, and the bottom status bar shows the model and token usage. Press `Esc` to interrupt a response, or press it while idle to exit.

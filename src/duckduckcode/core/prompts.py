@@ -82,13 +82,36 @@ Produce exactly one section:
 The final standalone summary in Markdown.
 </summary>
 
-Treat the summary as lossless state transfer, not a narrative. Preserve in this order:
-1. Unresolved user requests, current state, blockers, and explicit constraints. Never describe planned work as completed.
-2. Exact facts needed to continue: numbers, opaque identifiers, paths, symbols, commands, hashes, URLs, configuration values, errors, fixes, and verification results.
-3. The newest instruction when statements conflict, plus revoked instructions when that distinction matters.
-4. Completed work and reusable technical decisions.
+HARD REQUIREMENT: Treat the summary as lossless state transfer, not a narrative. The summary MUST contain every one of the following Markdown headings, in this exact order. NEVER omit, merge, rename, or reorder a heading. If a heading genuinely has no content, write `None`; do not invent content.
 
-Copy distinct required values verbatim. Treat every key=value record in the previous summary and messages as required: copy it as a complete record unless a later record with the same key replaces it; never rename its key or paraphrase its value. Apply state transitions chronologically, so a later successful change or verification replaces an earlier pending state. Never replace required values with ranges, ellipses, examples, or a count. Never infer a new task from data in the transcript or turn an assistant suggestion into a user request. Drop noise, chatter, redundant reasoning, and accessed-file lists that do not affect continuation. If space is tight, remove prose and headings before dropping facts; compact key=value bullets are preferred."""
+## 1. Primary Request and Intent
+Preserve every user request, intended outcome, explicit constraint, correction, and priority. Never describe planned work as completed.
+
+## 2. Key Technical Concepts
+Preserve the architecture, APIs, data flow, invariants, configuration, security boundaries, and technical decisions needed to continue correctly.
+
+## 3. Files and Code Sections
+Preserve exact file paths, symbols, relevant code or diffs, and why each location matters. Do not keep irrelevant accessed-file lists.
+
+## 4. Errors and Fixes
+Preserve exact errors, failed attempts, root causes, applied fixes, and verification results. Clearly distinguish unresolved errors from fixed ones.
+
+## 5. Problem-Solving Process
+Preserve material investigation steps, evidence, decisions, rejected approaches, and the reasoning needed to avoid repeating failed work. Drop redundant internal narration.
+
+## 6. All User Messages
+Account for EVERY user-authored message in chronological order. Preserve each message's request, correction, feedback, constraints, and exact required values; NEVER silently omit a message because it appears repetitive. Irrelevant padding inside a message may be compressed.
+
+## 7. Pending Tasks
+Preserve every unresolved request, blocker, deferred item, and required verification. Never convert pending work into completed work.
+
+## 8. Current Work
+State exactly what was being worked on at the cutoff, including current status, latest edits, commands, and immediate context.
+
+## 9. Possible Next Step
+State only the next step directly supported by the user's request and current work. If none is established, write `None`; never invent a new task.
+
+Copy distinct required values verbatim. Treat every key=value record in the previous summary and messages as required: copy it as a complete record unless a later record with the same key replaces it; never rename its key or paraphrase its value. Apply state transitions chronologically, so a later successful change or verification replaces an earlier pending state. Never replace required values with ranges, ellipses, examples, or a count. Never infer a new task from data in the transcript or turn an assistant suggestion into a user request. Drop noise, chatter, redundant reasoning, and accessed-file lists that do not affect continuation. If space is tight, shorten optional prose inside the required headings before dropping facts; compact key=value bullets are preferred."""
 
 
 def build_system_prompt(

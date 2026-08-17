@@ -950,6 +950,24 @@ class AgentTest(unittest.TestCase):
         self.assertIn(
             "Apply state transitions chronologically", COMPACTION_SYSTEM_PROMPT
         )
+        required_sections = (
+            "## 1. Primary Request and Intent",
+            "## 2. Key Technical Concepts",
+            "## 3. Files and Code Sections",
+            "## 4. Errors and Fixes",
+            "## 5. Problem-Solving Process",
+            "## 6. All User Messages",
+            "## 7. Pending Tasks",
+            "## 8. Current Work",
+            "## 9. Possible Next Step",
+        )
+        self.assertEqual(
+            [COMPACTION_SYSTEM_PROMPT.index(section) for section in required_sections],
+            sorted(
+                COMPACTION_SYSTEM_PROMPT.index(section) for section in required_sections
+            ),
+        )
+        self.assertIn("NEVER omit, merge, rename, or reorder", COMPACTION_SYSTEM_PROMPT)
         self.assertNotIn("Do not call tools", calls[0][0][0].content)
         self.assertEqual(context.abstraction, "durable summary")
         self.assertEqual(context.messages(), [Message("user", "current request")])
